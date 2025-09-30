@@ -5,12 +5,15 @@
 # 1. Convert PFF files to Zarr format (L0)
 # 2. Apply baseline subtraction to create L1 product
 #
-# Usage: ./run.sh <input_pff_files...> <output_l1_directory>
+# Usage: ./run.sh <input_pff_file1> [input_pff_file2 ...] <output_l1_directory>
 #
 # Example: ./run.sh file1.pff file2.pff /path/to/output/L1
 
 set -e  # Exit on error
 set -u  # Exit on undefined variable
+
+# Enable debugging - uncomment to see each command
+# set -x
 
 # Function to display usage
 usage() {
@@ -55,30 +58,91 @@ echo ""
 
 # Create output directories
 L0_TEMP_DIR="${OUTPUT_L1_DIR}/../L0_temp"
-mkdir -p "${OUTPUT_L1_DIR}"
-mkdir -p "${L0_TEMP_DIR}"
+mkdir -p "${OUTPUT_L1_DIR}" || {
+    echo "Error: Failed to create output directory: ${OUTPUT_L1_DIR}"
+    exit 1
+}
+mkdir -p "${L0_TEMP_DIR}" || {
+    echo "Error: Failed to create L0 temp directory: ${L0_TEMP_DIR}"
+    exit 1
+}
 
 echo "  L0 temp directory: ${L0_TEMP_DIR}"
 echo ""
 
 # Verify all input files exist
+echo "Verifying input files..."
 for pff_file in "${INPUT_FILES[@]}"; do
     if [ ! -f "${pff_file}" ]; then
         echo "Error: Input file not found: ${pff_file}"
         exit 1
     fi
+    echo "  ✓ Found: ${pff_file}"
 done
+echo ""
 
 # Check if required Python scripts exist
+echo "Checking required scripts..."
 if [ ! -f "step1_pff_to_zarr.py" ]; then
-    echo "Error: step1_pff_to_zarr.py not found!"
+    echo "Error: step1_pff_to_zarr.py not found in current directory!"
+    echo "Current directory: $(pwd)"
+    ls -la step*.py 2>/dev/null || echo "No step*.py files found"
     exit 1
 fi
+echo "  ✓ Found: step1_pff_to_zarr.py"
 
 if [ ! -f "step2_dask_baseline.py" ]; then
-    echo "Error: step2_dask_baseline.py not found!"
+    echo "Error: step2_dask_baseline.py not found in current directory!"
     exit 1
 fi
+echo "  ✓ Found: step2_dask_baseline.py"
+
+if [ ! -f "pff.py" ]; then
+    echo "Error: pff.py not found in current directory!"
+    exit 1
+fi
+echo "  ✓ Found: pff.py"
+echo ""
+
+# Check Python and required packages
+echo "Checking Python environment..."
+python3 --version || {
+    echo "Error: python3 not found!"
+    exit 1
+}
+
+echo "Checking Python packages..."
+python3 -c "import tensorstore; print('  ✓ tensorstore')" || {
+    echo "Error: tensorstore package not found!"
+    echo "Install with: pip install tensorstore"
+    exit 1
+}
+
+python3 -c "import zarr; print('  ✓ zarr')" || {
+    echo "Error: zarr package not found!"
+    exit 1
+}
+
+python3 -c "import xarray; print('  ✓ xarray')" || {
+    echo "Error: xarray package not found!"
+    exit 1
+}
+
+python3 -c "import dask; print('  ✓ dask')" || {
+    echo "Error: dask package not found!"
+    exit 1
+}
+
+python3 -c "import numpy; print('  ✓ numpy')" || {
+    echo "Error: numpy package not found!"
+    exit 1
+}
+
+python3 -c "import tqdm; print('  ✓ tqdm')" || {
+    echo "Error: tqdm package not found!"
+    exit 1
+}
+echo ""
 
 # Process each input file
 file_count=0
@@ -102,13 +166,21 @@ for pff_file in "${INPUT_FILES[@]}"; do
     echo "Step 1/2: Converting PFF to Zarr (L0)..."
     echo "  Input:  ${pff_file}"
     echo "  Output: ${L0_ZARR}"
-    python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}"
+
+    python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}" || {
+        echo "Error: Step 1 failed for ${pff_file}"
+        exit 1
+    }
 
     echo ""
     echo "Step 2/2: Applying baseline subtraction (L0 -> L1)..."
     echo "  Input:  ${L0_ZARR}"
     echo "  Output: ${L1_ZARR}"
-    python3 step2_dask_baseline.py "${L0_ZARR}" "${L1_ZARR}"
+
+    python3 step2_dask_baseline.py "${L0_ZARR}" "${L1_ZARR}" || {
+        echo "Error: Step 2 failed for ${basename}"
+        exit 1
+    }
 
     # Clean up L0 temporary file to save space
     echo ""
@@ -138,3 +210,4 @@ for pff_file in "${INPUT_FILES[@]}"; do
     echo "  - ${OUTPUT_L1_DIR}/${basename}_L1.zarr"
 done
 echo ""
+
