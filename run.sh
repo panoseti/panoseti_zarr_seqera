@@ -145,12 +145,10 @@ python3 -c "import tqdm; print('  [OK] tqdm')" || {
 echo ""
 
 # Process each input file
-file_count=0
+file_count=1  # Start at 1 to avoid ((0++)) issue with set -e
 total_files=${#INPUT_FILES[@]}
 
 for pff_file in "${INPUT_FILES[@]}"; do
-    ((file_count++))
-
     # Extract basename without extension for output naming
     basename=$(basename "${pff_file}" .pff)
 
@@ -170,7 +168,9 @@ for pff_file in "${INPUT_FILES[@]}"; do
 
     python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}" || {
         echo ""
-        echo "Error: Step 1 failed for ${pff_file}"
+        echo "=========================================="
+        echo "ERROR: Step 1 failed for ${pff_file}"
+        echo "=========================================="
         exit 1
     }
 
@@ -182,7 +182,9 @@ for pff_file in "${INPUT_FILES[@]}"; do
 
     python3 step2_dask_baseline.py "${L0_ZARR}" "${L1_ZARR}" || {
         echo ""
-        echo "Error: Step 2 failed for ${basename}"
+        echo "=========================================="
+        echo "ERROR: Step 2 failed for ${basename}"
+        echo "=========================================="
         exit 1
     }
 
@@ -194,6 +196,9 @@ for pff_file in "${INPUT_FILES[@]}"; do
     echo ""
     echo "[DONE] Completed ${basename}"
     echo ""
+
+    # Increment counter (now safe because it won't be 0)
+    file_count=$((file_count + 1))
 done
 
 # Clean up L0 temp directory if empty
