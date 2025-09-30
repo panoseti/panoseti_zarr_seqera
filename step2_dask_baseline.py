@@ -6,6 +6,7 @@ and output L1 data product
 
 import os
 import sys
+import argparse
 import numpy as np
 import xarray as xr
 import dask
@@ -47,21 +48,8 @@ def baseline_subtract(zarr_input: str, zarr_output: str, baseline_window: int = 
 
     images_da = ds.images.data  # Get dask array
 
-    # Calculate rolling mean along time axis
-    # We'll use a simple approach: compute mean of first N frames as baseline
-    # For a more sophisticated approach, you could use rolling windows
-
-    # Option 1: Simple baseline - mean of first N frames
+    # Calculate baseline - mean of first N frames
     baseline = images_da[:baseline_window].mean(axis=0, keepdims=True)
-
-    # Option 2: Per-pixel rolling baseline (more memory intensive)
-    # baseline = da.map_overlap(
-    #     lambda x: np.mean(x, axis=0, keepdims=True),
-    #     images_da,
-    #     depth={0: baseline_window//2, 1: 0, 2: 0},
-    #     boundary='reflect',
-    #     dtype=images_da.dtype
-    # )
 
     # Subtract baseline
     print("Subtracting baseline...")
@@ -121,18 +109,37 @@ def baseline_subtract(zarr_input: str, zarr_output: str, baseline_window: int = 
     print(f"Output size: {output_size / 1e9:.2f} GB")
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python step2_dask_baseline.py <input_zarr_L0> <output_zarr_L1>")
+    parser = argparse.ArgumentParser(
+        description='Apply baseline subtraction to L0 Zarr data to create L1 product',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    parser.add_argument(
+        'input_zarr',
+        type=str,
+        help='Path to input L0 Zarr directory'
+    )
+
+    parser.add_argument(
+        'output_zarr',
+        type=str,
+        help='Path to output L1 Zarr directory'
+    )
+
+    parser.add_argument(
+        '--baseline-window',
+        type=int,
+        default=100,
+        help='Number of frames to use for baseline calculation (default: 100)'
+    )
+
+    args = parser.parse_args()
+
+    if not os.path.exists(args.input_zarr):
+        print(f"Error: Input path does not exist: {args.input_zarr}")
         sys.exit(1)
 
-    zarr_input = sys.argv[1]
-    zarr_output = sys.argv[2]
-
-    if not os.path.exists(zarr_input):
-        print(f"Error: Input path does not exist: {zarr_input}")
-        sys.exit(1)
-
-    baseline_subtract(zarr_input, zarr_output, baseline_window=100)
+    baseline_subtract(args.input_zarr, args.output_zarr, baseline_window=args.baseline_window)
 
 if __name__ == "__main__":
     main()

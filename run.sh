@@ -4,89 +4,137 @@
 # This script performs two steps:
 # 1. Convert PFF files to Zarr format (L0)
 # 2. Apply baseline subtraction to create L1 product
+#
+# Usage: ./run.sh <input_pff_files...> <output_l1_directory>
+#
+# Example: ./run.sh file1.pff file2.pff /path/to/output/L1
 
 set -e  # Exit on error
+set -u  # Exit on undefined variable
 
-# Configuration
-IMG16_FILE="start_2024-07-25T04_34_46Z.dp_img16.bpp_2.module_1.seqno_0.debug_TRUNCATED.pff"
-PH256_FILE="start_2024-07-25T04_34_46Z.dp_ph256.bpp_2.module_1.seqno_0.debug_TRUNCATED.pff"
+# Function to display usage
+usage() {
+    echo "Usage: $0 <input_pff_file1> [input_pff_file2 ...] <output_l1_directory>"
+    echo ""
+    echo "Arguments:"
+    echo "  input_pff_file    One or more PFF files to process"
+    echo "  output_l1_dir     Directory where L1 products will be written"
+    echo ""
+    echo "Example:"
+    echo "  $0 file1.pff file2.pff /scratch/user/output/L1"
+    echo ""
+    echo "Requirements:"
+    echo "  - pff.py must be in the same directory or in PYTHONPATH"
+    echo "  - step1_pff_to_zarr.py and step2_dask_baseline.py must be available"
+    exit 1
+}
 
-# Output directories
-OUTPUT_DIR="output"
-L0_DIR="${OUTPUT_DIR}/L0"
-L1_DIR="${OUTPUT_DIR}/L1"
+# Check minimum number of arguments (at least 2: one input file + output dir)
+if [ $# -lt 2 ]; then
+    echo "Error: Insufficient arguments"
+    echo ""
+    usage
+fi
 
-# Create output directories
-mkdir -p "${L0_DIR}"
-mkdir -p "${L1_DIR}"
+# Parse arguments - last argument is output directory
+OUTPUT_L1_DIR="${@: -1}"
+# All arguments except last are input files
+INPUT_FILES=("${@:1:$#-1}")
 
 echo "================================================"
 echo "PANOSETI L0 -> L1 Processing Pipeline"
 echo "================================================"
 echo ""
+echo "Configuration:"
+echo "  Input files: ${#INPUT_FILES[@]}"
+for file in "${INPUT_FILES[@]}"; do
+    echo "    - $file"
+done
+echo "  Output L1 directory: ${OUTPUT_L1_DIR}"
+echo ""
 
-# Check if input files exist
-if [ ! -f "${IMG16_FILE}" ]; then
-    echo "Error: ${IMG16_FILE} not found!"
-    echo "Please ensure the PFF files are in the current directory."
+# Create output directories
+L0_TEMP_DIR="${OUTPUT_L1_DIR}/../L0_temp"
+mkdir -p "${OUTPUT_L1_DIR}"
+mkdir -p "${L0_TEMP_DIR}"
+
+echo "  L0 temp directory: ${L0_TEMP_DIR}"
+echo ""
+
+# Verify all input files exist
+for pff_file in "${INPUT_FILES[@]}"; do
+    if [ ! -f "${pff_file}" ]; then
+        echo "Error: Input file not found: ${pff_file}"
+        exit 1
+    fi
+done
+
+# Check if required Python scripts exist
+if [ ! -f "step1_pff_to_zarr.py" ]; then
+    echo "Error: step1_pff_to_zarr.py not found!"
     exit 1
 fi
 
-if [ ! -f "${PH256_FILE}" ]; then
-    echo "Error: ${PH256_FILE} not found!"
-    echo "Please ensure the PFF files are in the current directory."
+if [ ! -f "step2_dask_baseline.py" ]; then
+    echo "Error: step2_dask_baseline.py not found!"
     exit 1
 fi
 
-# Check if pff.py exists
-if [ ! -f "pff.py" ]; then
-    echo "Error: pff.py not found!"
-    echo "This file is required for parsing PFF format."
-    exit 1
+# Process each input file
+file_count=0
+total_files=${#INPUT_FILES[@]}
+
+for pff_file in "${INPUT_FILES[@]}"; do
+    ((file_count++))
+
+    # Extract basename without extension for output naming
+    basename=$(basename "${pff_file}" .pff)
+
+    echo "================================================"
+    echo "Processing file ${file_count}/${total_files}: ${basename}"
+    echo "================================================"
+    echo ""
+
+    # Define output paths
+    L0_ZARR="${L0_TEMP_DIR}/${basename}_L0.zarr"
+    L1_ZARR="${OUTPUT_L1_DIR}/${basename}_L1.zarr"
+
+    echo "Step 1/2: Converting PFF to Zarr (L0)..."
+    echo "  Input:  ${pff_file}"
+    echo "  Output: ${L0_ZARR}"
+    python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}"
+
+    echo ""
+    echo "Step 2/2: Applying baseline subtraction (L0 -> L1)..."
+    echo "  Input:  ${L0_ZARR}"
+    echo "  Output: ${L1_ZARR}"
+    python3 step2_dask_baseline.py "${L0_ZARR}" "${L1_ZARR}"
+
+    # Clean up L0 temporary file to save space
+    echo ""
+    echo "Cleaning up L0 temporary file..."
+    rm -rf "${L0_ZARR}"
+
+    echo ""
+    echo "✓ Completed ${basename}"
+    echo ""
+done
+
+# Clean up L0 temp directory if empty
+if [ -d "${L0_TEMP_DIR}" ] && [ -z "$(ls -A ${L0_TEMP_DIR})" ]; then
+    rmdir "${L0_TEMP_DIR}"
 fi
 
-# Process IMG16 file
-echo "================================================"
-echo "Processing IMG16 file: ${IMG16_FILE}"
-echo "================================================"
-echo ""
-
-IMG16_L0_ZARR="${L0_DIR}/img16_L0.zarr"
-IMG16_L1_ZARR="${L1_DIR}/img16_L1.zarr"
-
-echo "Step 1: Converting PFF to Zarr (L0)..."
-python3 step1_pff_to_zarr.py "${IMG16_FILE}" "${IMG16_L0_ZARR}"
-
-echo ""
-echo "Step 2: Applying baseline subtraction (L0 -> L1)..."
-python3 step2_dask_baseline.py "${IMG16_L0_ZARR}" "${IMG16_L1_ZARR}"
-
-echo ""
-echo "================================================"
-echo "Processing PH256 file: ${PH256_FILE}"
-echo "================================================"
-echo ""
-
-PH256_L0_ZARR="${L0_DIR}/ph256_L0.zarr"
-PH256_L1_ZARR="${L1_DIR}/ph256_L1.zarr"
-
-echo "Step 1: Converting PFF to Zarr (L0)..."
-python3 step1_pff_to_zarr.py "${PH256_FILE}" "${PH256_L0_ZARR}"
-
-echo ""
-echo "Step 2: Applying baseline subtraction (L0 -> L1)..."
-python3 step2_dask_baseline.py "${PH256_L0_ZARR}" "${PH256_L1_ZARR}"
-
-echo ""
 echo "================================================"
 echo "Pipeline Complete!"
 echo "================================================"
 echo ""
+echo "Processed ${total_files} file(s)"
+echo "L1 products written to: ${OUTPUT_L1_DIR}"
+echo ""
 echo "Output files:"
-echo "  L0 products:"
-echo "    - ${IMG16_L0_ZARR}"
-echo "    - ${PH256_L0_ZARR}"
-echo "  L1 products:"
-echo "    - ${IMG16_L1_ZARR}"
-echo "    - ${PH256_L1_ZARR}"
+for pff_file in "${INPUT_FILES[@]}"; do
+    basename=$(basename "${pff_file}" .pff)
+    echo "  - ${OUTPUT_L1_DIR}/${basename}_L1.zarr"
+done
 echo ""

@@ -14,6 +14,7 @@ import numpy as np
 import tensorstore as ts
 from tqdm import tqdm
 import time
+from pathlib import Path
 
 import pff
 
@@ -57,10 +58,12 @@ def _zarr3_codec_chain(codec: str, level: int):
         return codecs
 
 async def _open_ts_array(root_path, name, shape, chunks, np_dtype, codec_chain, attributes=None, create=True, delete_existing=True):
+    # Convert to absolute path to avoid TensorStore path issues
+    root_path_abs = str(Path(root_path).resolve())
 
     spec = {
         "driver": "zarr3",
-        "kvstore": {"driver": "file", "path": str(root_path)},
+        "kvstore": {"driver": "file", "path": root_path_abs},
         "metadata": {
             "shape": list(shape),
             "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": list(chunks)}},
@@ -84,6 +87,9 @@ async def convert_pff_to_tensorstore(
 ):
     if not os.path.exists(pff_path):
         raise FileNotFoundError(pff_path)
+
+    # Convert zarr_root to absolute path
+    zarr_root = str(Path(zarr_root).resolve())
 
     # ensure target directory is clean
     if os.path.exists(zarr_root):
