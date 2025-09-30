@@ -77,7 +77,7 @@ for pff_file in "${INPUT_FILES[@]}"; do
         echo "Error: Input file not found: ${pff_file}"
         exit 1
     fi
-    echo "  ✓ Found: ${pff_file}"
+    echo "  [OK] Found: ${pff_file}"
 done
 echo ""
 
@@ -89,19 +89,19 @@ if [ ! -f "step1_pff_to_zarr.py" ]; then
     ls -la step*.py 2>/dev/null || echo "No step*.py files found"
     exit 1
 fi
-echo "  ✓ Found: step1_pff_to_zarr.py"
+echo "  [OK] Found: step1_pff_to_zarr.py"
 
 if [ ! -f "step2_dask_baseline.py" ]; then
     echo "Error: step2_dask_baseline.py not found in current directory!"
     exit 1
 fi
-echo "  ✓ Found: step2_dask_baseline.py"
+echo "  [OK] Found: step2_dask_baseline.py"
 
 if [ ! -f "pff.py" ]; then
     echo "Error: pff.py not found in current directory!"
     exit 1
 fi
-echo "  ✓ Found: pff.py"
+echo "  [OK] Found: pff.py"
 echo ""
 
 # Check Python and required packages
@@ -112,33 +112,33 @@ python3 --version || {
 }
 
 echo "Checking Python packages..."
-python3 -c "import tensorstore; print('  ✓ tensorstore')" || {
+python3 -c "import tensorstore; print('  [OK] tensorstore')" || {
     echo "Error: tensorstore package not found!"
     echo "Install with: pip install tensorstore"
     exit 1
 }
 
-python3 -c "import zarr; print('  ✓ zarr')" || {
+python3 -c "import zarr; print('  [OK] zarr')" || {
     echo "Error: zarr package not found!"
     exit 1
 }
 
-python3 -c "import xarray; print('  ✓ xarray')" || {
+python3 -c "import xarray; print('  [OK] xarray')" || {
     echo "Error: xarray package not found!"
     exit 1
 }
 
-python3 -c "import dask; print('  ✓ dask')" || {
+python3 -c "import dask; print('  [OK] dask')" || {
     echo "Error: dask package not found!"
     exit 1
 }
 
-python3 -c "import numpy; print('  ✓ numpy')" || {
+python3 -c "import numpy; print('  [OK] numpy')" || {
     echo "Error: numpy package not found!"
     exit 1
 }
 
-python3 -c "import tqdm; print('  ✓ tqdm')" || {
+python3 -c "import tqdm; print('  [OK] tqdm')" || {
     echo "Error: tqdm package not found!"
     exit 1
 }
@@ -166,8 +166,10 @@ for pff_file in "${INPUT_FILES[@]}"; do
     echo "Step 1/2: Converting PFF to Zarr (L0)..."
     echo "  Input:  ${pff_file}"
     echo "  Output: ${L0_ZARR}"
+    echo ""
 
     python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}" || {
+        echo ""
         echo "Error: Step 1 failed for ${pff_file}"
         exit 1
     }
@@ -176,8 +178,10 @@ for pff_file in "${INPUT_FILES[@]}"; do
     echo "Step 2/2: Applying baseline subtraction (L0 -> L1)..."
     echo "  Input:  ${L0_ZARR}"
     echo "  Output: ${L1_ZARR}"
+    echo ""
 
     python3 step2_dask_baseline.py "${L0_ZARR}" "${L1_ZARR}" || {
+        echo ""
         echo "Error: Step 2 failed for ${basename}"
         exit 1
     }
@@ -188,7 +192,7 @@ for pff_file in "${INPUT_FILES[@]}"; do
     rm -rf "${L0_ZARR}"
 
     echo ""
-    echo "✓ Completed ${basename}"
+    echo "[DONE] Completed ${basename}"
     echo ""
 done
 
