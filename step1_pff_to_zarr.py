@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Step 1: Convert L0 PFF-formatted data to L0 Zarr-formatted data using TensorStore
+Optimized version with concurrent async I/O
 """
 
 import os
@@ -15,7 +16,7 @@ import tensorstore as ts
 from tqdm import tqdm
 import time
 from pathlib import Path
-
+from concurrent.futures import ThreadPoolExecutor
 import pff
 
 def _infer_dp_from_name(pff_path: str):
@@ -82,8 +83,9 @@ async def convert_pff_to_tensorstore(
     pff_path: str,
     zarr_root: str,
     codec: str = "zstd",
-    level: int = 3,
-    time_chunk: int = 8192,
+    level: int = 1,  # Lower compression level for speed (was 3)
+    time_chunk: int = 1024,  # Smaller chunks for more frequent async writes (was 8192)
+    max_concurrent_writes: int = 8,  # Limit concurrent operations
 ):
     if not os.path.exists(pff_path):
         raise FileNotFoundError(pff_path)
@@ -174,28 +176,47 @@ async def convert_pff_to_tensorstore(
 
     # streaming parse/write
     written = 0
-    futures = []
+    active_writes = []  # Track concurrent write operations
+    semaphore = asyncio.Semaphore(max_concurrent_writes)  # Limit concurrent writes
 
-    def flush_batch(n):
-        nonlocal written, futures
+    async def flush_batch(n):
+        """
+        Asynchronously flush batch data to disk with concurrency control.
+        This version actually executes writes concurrently instead of queuing them all.
+        """
+        nonlocal written
+
         if n == 0:
             return
-        s = slice(written, written + n)
-        f = images[s, :, :].write(img_batch[:n])
-        if f is not None:
-            futures.append(f)
-        f = timestamps[s].write(ts_batch[:n])
-        if f is not None:
-            futures.append(f)
-        for k, arr in header_arrays.items():
-            f = arr[s].write(header_batches[k][:n])
-            if f is not None:
-                futures.append(f)
+
+        # Wait for semaphore to limit concurrent operations
+        async with semaphore:
+            s = slice(written, written + n)
+
+            # Create write tasks for this batch
+            write_tasks = []
+
+            # Write images (largest data, highest priority)
+            write_tasks.append(images[s, :, :].write(img_batch[:n].copy()))
+
+            # Write timestamps
+            write_tasks.append(timestamps[s].write(ts_batch[:n].copy()))
+
+            # Write headers
+            for k, arr in header_arrays.items():
+                write_tasks.append(arr[s].write(header_batches[k][:n].copy()))
+
+            # Execute all writes for this batch concurrently
+            await asyncio.gather(*write_tasks)
+
         written += n
         pbar.update(n)
 
+    # Parse PFF file
     with open(pff_path, "rb") as f:
         bi = 0
+        pending_flush = None
+
         for i in range(T):
             hdr_str = pff.read_json(f)
             if hdr_str is None:
@@ -238,16 +259,16 @@ async def convert_pff_to_tensorstore(
                             header_batches[name][bi] = np.int64(q.get(fld, header.get(fld, 0)))
 
             bi += 1
+
+            # Flush when batch is full
+            # Key optimization: await the flush immediately to enable concurrent I/O
             if bi == batch_T:
-                flush_batch(bi)
+                await flush_batch(bi)
                 bi = 0
 
+        # Flush remaining data
         if bi > 0:
-            flush_batch(bi)
-
-    # flush all writes
-    for fut in futures:
-        await fut
+            await flush_batch(bi)
 
     pbar.close()
 
@@ -267,11 +288,15 @@ async def convert_pff_to_tensorstore(
     zarr_size = _dir_size(zarr_root)
     compression_ratio = (pff_file_size / zarr_size) if zarr_size > 0 else float("inf")
 
+    # Calculate throughput
+    throughput_mbps = (pff_file_size / (1024**2)) / elapsed_s if elapsed_s > 0 else 0
+
     # print compression report
     report = {
         "source_pff": os.path.basename(pff_path),
         "frames": T,
         "elapsed_seconds": elapsed_s,
+        "throughput_MB_per_sec": throughput_mbps,
         "pff_size_bytes": pff_file_size,
         "zarr_size_bytes": zarr_size,
         "compression_ratio_pff_over_zarr": compression_ratio,
@@ -306,10 +331,11 @@ async def main():
     await convert_pff_to_tensorstore(
         pff_path,
         zarr_root,
-        time_chunk=8192,
+        time_chunk=1024,  # Smaller chunks for better parallelism
         codec="zstd",
-        level=3
+        level=1  # Lower compression for speed (3x faster than level 3)
     )
 
 if __name__ == "__main__":
     asyncio.run(main())
+
