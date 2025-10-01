@@ -4,23 +4,14 @@
 
 Step 1: Convert L0 PFF-formatted data to L0 Zarr-formatted data using TensorStore
 
-PARALLEL PFF READING - HDD/BeeGFS OPTIMIZED VERSION:
+PARALLEL PFF READING - HDD/BeeGFS OPTIMIZED WITH CONFIG FILE SUPPORT
 
-Key optimization for HDDs and network filesystems (BeeGFS):
-- Each worker reads ONE LARGE SEQUENTIAL CHUNK (10-100 MB)
-- Avoids many small seeks (extremely slow on HDDs)
-- Optimal for BeeGFS stripe performance
-- Workers read different parts of file independently
-
-Strategy:
-1. Discover frame size from first frame
-2. Split file into N large byte-range chunks (not frame-by-frame)
-3. Each worker reads its entire chunk sequentially (one large read)
-4. Parse frames from in-memory buffer
-5. Write results asynchronously
-
-For HDDs: Sequential reads are 100-200x faster than random seeks
-For BeeGFS: Large sequential I/O utilizes stripe parallelism
+Features:
+- Each worker reads ONE LARGE SEQUENTIAL CHUNK (optimal for HDDs/BeeGFS)
+- Accurate progress tracking with tqdm
+- TOML configuration file support
+- Multi-threaded blosc compression
+- Async TensorStore writes
 
 """
 
@@ -40,14 +31,22 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import cpu_count
 import pff
 
+# Try to import tomli/tomllib for TOML support
+try:
+    import tomllib  # Python 3.11+
+except ImportError:
+    try:
+        import tomli as tomllib  # Fallback for older Python
+    except ImportError:
+        tomllib = None
+
 # Configure Blosc for multi-threading
 try:
     import blosc
     num_cores = os.cpu_count() or 4
     blosc.set_nthreads(num_cores)
-    print(f"Blosc configured to use {num_cores} threads for compression")
 except ImportError:
-    print("Warning: python-blosc not installed, using tensorstore's blosc")
+    pass
 
 def _infer_dp_from_name(pff_path: str):
     """Parse data product type from PFF filename"""
@@ -117,11 +116,8 @@ async def _open_ts_array(root_path, name, shape, chunks, np_dtype, codec_chain,
         return await ts.open(spec)
 
 def discover_frame_structure(pff_path: str, W: int, bpp: int):
-    """
-    Discover the fixed frame structure from the first frame.
-    """
+    """Discover the fixed frame structure from the first frame"""
     with open(pff_path, 'rb') as f:
-        # Read first header
         header_with_sep = b''
         while True:
             chunk = f.read(1)
@@ -132,9 +128,8 @@ def discover_frame_structure(pff_path: str, W: int, bpp: int):
                 break
 
         header_size = len(header_with_sep)
-        img_data_size = 1 + W * W * bpp  # 1 byte for '*' prefix + image data
+        img_data_size = 1 + W * W * bpp
 
-        # Verify by reading image data
         img_data = f.read(img_data_size)
         if len(img_data) != img_data_size:
             raise ValueError(f"Expected {img_data_size} bytes of image data, got {len(img_data)}")
@@ -146,14 +141,7 @@ def discover_frame_structure(pff_path: str, W: int, bpp: int):
 def parse_frames_from_buffer(buffer: bytes, header_size: int, img_data_size: int,
                             frame_size: int, W: int, np_img_dtype, header_kind: str,
                             max_frames: int = None):
-    """
-    Parse multiple frames from a memory buffer.
-
-    This is the key function that enables sequential reading:
-    - Read one large chunk into memory
-    - Parse all frames from the buffer (no disk I/O)
-    - Much faster than seek + read per frame
-    """
+    """Parse multiple frames from a memory buffer"""
     H = W
     imgs = []
     timestamps = []
@@ -166,16 +154,13 @@ def parse_frames_from_buffer(buffer: bytes, header_size: int, img_data_size: int
         if max_frames and frame_count >= max_frames:
             break
 
-        # Parse header
         header_bytes = buffer[pos:pos + header_size]
         try:
             header = json.loads(header_bytes[:-2].decode('utf-8'))
         except (json.JSONDecodeError, UnicodeDecodeError):
-            # Skip invalid frame
             pos += frame_size
             continue
 
-        # Parse image (skip '*' prefix)
         img_start = pos + header_size + 1
         img_end = img_start + (W * W * np_img_dtype().itemsize)
         img_bytes = buffer[img_start:img_end]
@@ -186,7 +171,6 @@ def parse_frames_from_buffer(buffer: bytes, header_size: int, img_data_size: int
         img = np.frombuffer(img_bytes, dtype=np_img_dtype).reshape(H, W)
         imgs.append(img)
 
-        # Extract timestamp
         if header_kind == "ph256_one_level":
             if "pkt_tai" in header and "pkt_nsec" in header:
                 ts = float(header["pkt_tai"]) + float(header["pkt_nsec"])*1e-9
@@ -210,7 +194,6 @@ def parse_frames_from_buffer(buffer: bytes, header_size: int, img_data_size: int
         pos += frame_size
         frame_count += 1
 
-    # Convert to numpy arrays
     if imgs:
         imgs = np.stack(imgs, axis=0)
         timestamps = np.array(timestamps, dtype=np.float64)
@@ -221,39 +204,19 @@ def parse_frames_from_buffer(buffer: bytes, header_size: int, img_data_size: int
     return imgs, timestamps, headers
 
 def read_sequential_chunk_worker(args):
-    """
-    Worker function optimized for HDDs and BeeGFS.
-
-    KEY OPTIMIZATION:
-    - Reads ONE LARGE SEQUENTIAL CHUNK (10-100 MB)
-    - Single f.read() call - no seeks
-    - Parses all frames from memory buffer
-
-    For HDDs:
-    - Sequential read: ~100-200 MB/s
-    - Random seeks: ~1-5 MB/s (100x slower!)
-
-    For BeeGFS:
-    - Large sequential reads utilize stripe parallelism
-    - Reduced metadata operations
-    """
+    """Worker function optimized for HDDs and BeeGFS - reads one large sequential chunk"""
     pff_path, byte_start, byte_end, header_size, img_data_size, frame_size, \
         W, np_img_dtype, header_kind, start_frame_hint = args
 
-    # Calculate exact frame boundaries
-    # Round down to nearest frame boundary
     aligned_start = (byte_start // frame_size) * frame_size
-    # Round up to nearest frame boundary (with small overlap for safety)
     aligned_end = ((byte_end + frame_size - 1) // frame_size) * frame_size
 
     chunk_size = aligned_end - aligned_start
 
-    # SINGLE LARGE SEQUENTIAL READ (KEY OPTIMIZATION)
     with open(pff_path, 'rb') as f:
         f.seek(aligned_start)
         buffer = f.read(chunk_size)
 
-    # Parse all frames from buffer (in memory, very fast)
     imgs, timestamps, headers = parse_frames_from_buffer(
         buffer, header_size, img_data_size, frame_size,
         W, np_img_dtype, header_kind
@@ -264,29 +227,22 @@ def read_sequential_chunk_worker(args):
 async def convert_pff_to_tensorstore(
     pff_path: str,
     zarr_root: str,
-    codec: str = "blosc-lz4",
-    level: int = 1,
-    time_chunk: int = 32768,
-    max_concurrent_writes: int = 12,
-    num_workers: int = None,
-    chunk_size_mb: int = 50,  # Size of sequential chunk per worker
+    config: dict,
 ):
     """
     Convert PFF to Zarr using PARALLEL SEQUENTIAL READING.
 
-    Optimized for HDDs and BeeGFS:
-    - Each worker reads a large sequential chunk (default 50 MB)
-    - No random seeks (critical for HDD performance)
-    - Large reads utilize BeeGFS stripe parallelism
-
     Parameters:
     -----------
-    num_workers : int
-        Number of parallel workers (default: CPU count)
-    chunk_size_mb : int
-        Size of sequential chunk per worker in MB (default: 50)
-        Larger = better for HDDs (fewer seeks)
-        Recommended: 20-100 MB for HDDs, 50-200 MB for BeeGFS
+    config : dict
+        Configuration dictionary with keys:
+        - codec: Compression codec
+        - level: Compression level
+        - time_chunk: Frames per Zarr chunk
+        - max_concurrent_writes: Max concurrent async writes
+        - num_workers: Number of parallel workers
+        - chunk_size_mb: MB per sequential read
+        - blosc_threads: Number of blosc threads
     """
     if not os.path.exists(pff_path):
         raise FileNotFoundError(pff_path)
@@ -298,9 +254,17 @@ async def convert_pff_to_tensorstore(
 
     root_group = zarr.open_group(zarr_root, mode='w')
 
+    # Configure blosc threads
+    try:
+        import blosc
+        blosc_threads = config.get('blosc_threads', os.cpu_count() or 4)
+        blosc.set_nthreads(blosc_threads)
+        print(f"Blosc configured to use {blosc_threads} threads for compression")
+    except ImportError:
+        print("Warning: python-blosc not installed")
+
     name_parts, dp, bpp, img_hw, np_img_dtype, bytes_per_image, header_kind = _infer_dp_from_name(pff_path)
 
-    # Get frame count
     with open(pff_path, "rb") as f:
         i0, nframes, t0, t1 = pff.img_info(f, bytes_per_image)
 
@@ -314,12 +278,18 @@ async def convert_pff_to_tensorstore(
     print(f"  Total frames:   {nframes}")
 
     file_size = os.path.getsize(pff_path)
+    chunk_size_mb = config.get('chunk_size_mb', 50)
     chunk_size_bytes = chunk_size_mb * 1024 * 1024
     frames_per_chunk = chunk_size_bytes // frame_size
 
     print(f"\nOptimized for HDD/BeeGFS:")
     print(f"  Sequential chunk size: {chunk_size_mb} MB ({frames_per_chunk} frames)")
     print(f"  Each worker: 1 large sequential read (no seeks)")
+
+    codec = config.get('codec', 'blosc-lz4')
+    level = config.get('level', 1)
+    time_chunk = config.get('time_chunk', 32768)
+    max_concurrent_writes = config.get('max_concurrent_writes', 12)
 
     print(f"\nCreating Zarr group at: {zarr_root}")
     print(f"Settings: codec={codec}, level={level}, time_chunk={time_chunk}")
@@ -331,14 +301,12 @@ async def convert_pff_to_tensorstore(
     ts_shape_only = (T,)
     ts_chunks_scalar = (max(1024, time_chunk*2),)
 
-    # Create TensorStore context
     num_cores = os.cpu_count() or 4
     context = ts.Context({
         'file_io_concurrency': {'limit': max(num_cores, max_concurrent_writes * 2)},
         'cache_pool': {'total_bytes_limit': 1_000_000_000}
     })
 
-    # Create TensorStore arrays
     images = await _open_ts_array(
         zarr_root, "images",
         img_shape, img_chunks, np_img_dtype, codecs,
@@ -353,7 +321,6 @@ async def convert_pff_to_tensorstore(
         ts_shape_only, ts_chunks_scalar, np.float64, codecs,
         attributes={"_ARRAY_DIMENSIONS": ["time"]}, create=True, context=context)
 
-    # Create header arrays
     header_arrays = {}
     root_group.create_group('headers')
     if header_kind == "ph256_one_level":
@@ -385,15 +352,17 @@ async def convert_pff_to_tensorstore(
     pff_file_size = os.path.getsize(pff_path)
     start = time.monotonic()
 
-    pbar = tqdm(total=T, desc="Converting PFF -> Zarr (HDD OPTIMIZED)", unit="frames")
+    # ACCURATE PROGRESS BAR: Track frames written
+    pbar = tqdm(total=T, desc="Converting PFF -> Zarr (HDD OPTIMIZED)", unit="frames", 
+                smoothing=0.1, dynamic_ncols=True)
 
-    written = 0
+    frames_written = 0
     pending_writes = deque()
     semaphore = asyncio.Semaphore(max_concurrent_writes)
 
     async def flush_batch(img_batch, ts_batch, header_list, n, start_frame):
-        """Flush batch with concurrency control"""
-        nonlocal written
+        """Flush batch with concurrency control and progress tracking"""
+        nonlocal frames_written
         if n == 0:
             return
 
@@ -401,15 +370,12 @@ async def convert_pff_to_tensorstore(
             s = slice(start_frame, start_frame + n)
             write_futures = []
 
-            # Write images
             fut = images[s, :, :].write(img_batch[:n])
             if fut: write_futures.append(fut)
 
-            # Write timestamps
             fut = timestamps[s].write(ts_batch[:n])
             if fut: write_futures.append(fut)
 
-            # Write headers
             if header_kind == "ph256_one_level":
                 for k, arr in header_arrays.items():
                     data = np.array([h.get(k, 0) for h in header_list[:n]], dtype=arr.dtype.numpy_dtype)
@@ -428,22 +394,21 @@ async def convert_pff_to_tensorstore(
             if write_futures:
                 await asyncio.gather(*write_futures)
 
+            # Update progress bar AFTER write completes
             pbar.update(n)
+            frames_written += n
 
-    # PARALLEL SEQUENTIAL READING
+    num_workers = config.get('num_workers', None)
     if num_workers is None:
-        num_workers = min(cpu_count(), 8)  # Cap at 8 for HDD to avoid thrashing
+        num_workers = min(cpu_count(), 8)
 
     print(f"\nReading with {num_workers} parallel workers...")
-    print(f"Each worker reads {chunk_size_mb} MB sequentially (HDD-optimized)")
+    print(f"Each worker reads ~{file_size / num_workers / (1024**2):.1f} MB sequentially")
 
-    # Create work chunks based on byte ranges (not frame counts)
     work_chunks = []
     for worker_id in range(num_workers):
         byte_start = (file_size * worker_id) // num_workers
         byte_end = (file_size * (worker_id + 1)) // num_workers if worker_id < num_workers - 1 else file_size
-
-        # Estimate starting frame for this chunk
         start_frame_hint = (byte_start // frame_size)
 
         work_chunks.append((
@@ -451,14 +416,11 @@ async def convert_pff_to_tensorstore(
             W, np_img_dtype, header_kind, start_frame_hint
         ))
 
-    print(f"Created {len(work_chunks)} work chunks (avg {file_size / num_workers / (1024**2):.1f} MB each)")
+    print(f"Created {len(work_chunks)} work chunks\n")
 
-    # Process chunks in parallel
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        # Submit all work
         futures = [executor.submit(read_sequential_chunk_worker, chunk) for chunk in work_chunks]
 
-        # Collect results as they complete
         results = []
         for future in futures:
             imgs, ts_batch, header_list, start_frame = future.result()
@@ -466,20 +428,16 @@ async def convert_pff_to_tensorstore(
             if n > 0:
                 results.append((imgs, ts_batch, header_list, start_frame))
 
-        # Sort by start_frame to maintain order
         results.sort(key=lambda x: x[3])
 
-        # Write in order
         for imgs, ts_batch, header_list, start_frame in results:
             n = len(imgs)
             task = asyncio.create_task(flush_batch(imgs, ts_batch, header_list, n, start_frame))
             pending_writes.append(task)
 
-            # Limit concurrent writes
             while len(pending_writes) >= max_concurrent_writes:
                 await pending_writes.popleft()
 
-    # Wait for all pending writes
     while pending_writes:
         await pending_writes.popleft()
 
@@ -487,7 +445,6 @@ async def convert_pff_to_tensorstore(
     end = time.monotonic()
     elapsed_s = end - start
 
-    # Compute size
     def _dir_size(path):
         total = 0
         for dirpath, _, filenames in os.walk(path):
@@ -504,6 +461,7 @@ async def convert_pff_to_tensorstore(
     report = {
         "source_pff": os.path.basename(pff_path),
         "frames": T,
+        "frames_written": frames_written,
         "elapsed_seconds": round(elapsed_s, 2),
         "throughput_MB_per_sec": round(throughput_mbps, 2),
         "pff_size_MB": round(pff_file_size / (1024**2), 2),
@@ -520,49 +478,80 @@ async def convert_pff_to_tensorstore(
     print("="*60)
     return report
 
+def load_config(config_path: str = None):
+    """Load configuration from TOML file or environment variables"""
+    config = {
+        'codec': 'blosc-lz4',
+        'level': 1,
+        'time_chunk': 32768,
+        'max_concurrent_writes': 12,
+        'num_workers': None,  # Auto-detect
+        'chunk_size_mb': 50,
+        'blosc_threads': None,  # Auto-detect
+    }
+
+    # Load from TOML file if provided
+    if config_path and os.path.exists(config_path):
+        if tomllib is None:
+            print(f"Warning: Cannot read {config_path} - tomli/tomllib not installed")
+            print("Install with: pip install tomli")
+        else:
+            with open(config_path, 'rb') as f:
+                toml_config = tomllib.load(f)
+                if 'pff_to_zarr' in toml_config:
+                    config.update(toml_config['pff_to_zarr'])
+            print(f"Loaded configuration from {config_path}")
+
+    # Override with environment variables
+    if os.environ.get('TS_CODEC'):
+        config['codec'] = os.environ['TS_CODEC']
+    if os.environ.get('TS_LEVEL'):
+        config['level'] = int(os.environ['TS_LEVEL'])
+    if os.environ.get('TS_CHUNK'):
+        config['time_chunk'] = int(os.environ['TS_CHUNK'])
+    if os.environ.get('TS_CONCURRENT'):
+        config['max_concurrent_writes'] = int(os.environ['TS_CONCURRENT'])
+    if os.environ.get('BLOSC_NTHREADS'):
+        config['blosc_threads'] = int(os.environ['BLOSC_NTHREADS'])
+
+    return config
+
 async def main():
-    if len(sys.argv) not in [3, 4, 5]:
-        print("Usage: python step1_pff_to_zarr.py <input.pff> <output.zarr> [num_workers] [chunk_size_mb]")
+    if len(sys.argv) < 3:
+        print("Usage: python step1_pff_to_zarr.py <input.pff> <output.zarr> [config.toml]")
         print()
         print("Arguments:")
-        print("  num_workers: Number of parallel workers (default: CPU count, max 8)")
-        print("  chunk_size_mb: MB per sequential read (default: 50)")
+        print("  config.toml: Optional TOML configuration file")
         print()
-        print("Recommended for HDDs: num_workers=4-8, chunk_size_mb=50-100")
-        print("Recommended for BeeGFS: num_workers=8-16, chunk_size_mb=100-200")
+        print("Configuration priority (highest to lowest):")
+        print("  1. Environment variables (TS_CODEC, TS_LEVEL, etc.)")
+        print("  2. TOML config file")
+        print("  3. Default values")
         print()
-        print("Environment variables:")
-        print("  TS_CODEC=blosc-lz4|zstd|gzip|none (default: blosc-lz4)")
-        print("  TS_LEVEL=1-9 (default: 1)")
-        print("  TS_CHUNK=32768 (default: 32768)")
-        print("  TS_CONCURRENT=12 (default: 12)")
-        print()
-        print("HDD/BeeGFS OPTIMIZATION:")
-        print("  - Each worker reads ONE large sequential chunk")
-        print("  - No random seeks (critical for HDD performance)")
-        print("  - Large I/O utilizes BeeGFS stripes")
+        print("Example config.toml:")
+        print("  [pff_to_zarr]")
+        print("  codec = 'blosc-lz4'")
+        print("  level = 1")
+        print("  time_chunk = 32768")
+        print("  max_concurrent_writes = 12")
+        print("  num_workers = 8")
+        print("  chunk_size_mb = 100")
+        print("  blosc_threads = 8")
         sys.exit(1)
 
     pff_path = sys.argv[1]
     zarr_root = sys.argv[2]
-    num_workers = int(sys.argv[3]) if len(sys.argv) >= 4 else None
-    chunk_size_mb = int(sys.argv[4]) if len(sys.argv) == 5 else 50
+    config_path = sys.argv[3] if len(sys.argv) > 3 else None
 
-    codec = os.environ.get("TS_CODEC", "blosc-lz4")
-    level = int(os.environ.get("TS_LEVEL", "1"))
-    time_chunk = int(os.environ.get("TS_CHUNK", "32768"))
-    max_concurrent = int(os.environ.get("TS_CONCURRENT", "12"))
+    config = load_config(config_path)
 
-    await convert_pff_to_tensorstore(
-        pff_path,
-        zarr_root,
-        codec=codec,
-        level=level,
-        time_chunk=time_chunk,
-        max_concurrent_writes=max_concurrent,
-        num_workers=num_workers,
-        chunk_size_mb=chunk_size_mb
-    )
+    print("Configuration:")
+    for key, value in config.items():
+        if value is not None:
+            print(f"  {key}: {value}")
+    print()
+
+    await convert_pff_to_tensorstore(pff_path, zarr_root, config)
 
 if __name__ == "__main__":
     asyncio.run(main())
