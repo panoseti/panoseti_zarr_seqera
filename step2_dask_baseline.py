@@ -4,6 +4,7 @@
 Step 2: Baseline subtraction using Dask distributed computing
 
 UPDATED: Now accepts existing Dask scheduler address instead of creating cluster
+FIXED: Proper async/await handling for Dask client operations
 """
 
 import os
@@ -17,7 +18,6 @@ from pathlib import Path
 import time
 from dask.distributed import Client, wait
 from dask.diagnostics import ProgressBar
-import cluster_manager
 
 # Try to import tomli/tomllib
 try:
@@ -59,14 +59,15 @@ async def connect_to_dask(scheduler_address: str):
     try:
         print(f"Connecting to Dask scheduler: {scheduler_address}")
         client = await Client(scheduler_address, asynchronous=True)
-        print(f"  ✓ Connected! Workers: {len(client.scheduler_info()['workers'])}")
+        worker_info = await client.scheduler_info()
+        print(f"  ✓ Connected! Workers: {len(worker_info['workers'])}")
         return client
     except Exception as e:
         print(f"Warning: Could not connect to Dask scheduler: {e}")
         print("Falling back to local threading")
         return None
 
-def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict, client=None):
+async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict, client=None):
     """
     Perform baseline subtraction using Dask distributed computing.
     """
@@ -93,9 +94,10 @@ def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict, clie
     # Check if we have a Dask client
     use_distributed = client is not None
     if use_distributed:
+        worker_info = await client.scheduler_info()
         print(f"\nUsing Dask distributed computing")
-        print(f"Workers: {len(client.scheduler_info()['workers'])}")
-        print(f"Total cores: {sum(w['nthreads'] for w in client.scheduler_info()['workers'].values())}")
+        print(f"Workers: {len(worker_info['workers'])}")
+        print(f"Total cores: {sum(w['nthreads'] for w in worker_info['workers'].values())}")
     else:
         print(f"\nUsing local Dask threading")
     
@@ -153,16 +155,22 @@ def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict, clie
     # Write with progress
     write_start = time.time()
     if use_distributed:
-        # Use Dask distributed compute
+        # Use Dask distributed compute - FIXED: properly handle async
         print("Computing with Dask cluster...")
-        future = ds_out.to_zarr(
+        
+        # Get the delayed write operation
+        delayed = ds_out.to_zarr(
             zarr_output,
             mode='w',
             encoding=encoding,
             compute=False,
             consolidated=True
         )
-        result = client.compute(future, sync=True)
+        
+        # Compute using async client - FIXED: await gather
+        futures = client.compute(delayed)
+        result = await client.gather(futures)
+        
     else:
         # Use local Dask with progress bar
         print("Computing locally with Dask...")
@@ -241,11 +249,12 @@ async def main_async():
         client = await connect_to_dask(args.dask_scheduler)
     
     try:
-        baseline_subtract_dask(args.input_zarr, args.output_zarr, config, client)
+        await baseline_subtract_dask(args.input_zarr, args.output_zarr, config, client)
     finally:
         # Close client connection (but don't shutdown cluster)
         if client:
             print("  Keeping cluster alive for next task...")
+            await client.close()
 
 def main():
     """Synchronous wrapper for async main"""

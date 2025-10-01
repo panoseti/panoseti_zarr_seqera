@@ -207,7 +207,7 @@ async def connect_to_dask(scheduler_address: str):
     try:
         print(f"Connecting to Dask scheduler: {scheduler_address}")
         client = await Client(scheduler_address, asynchronous=True)
-        print(f"  ✓ Connected! Workers: {len(client.scheduler_info()['workers'])}")
+        print(f"  ✓ Connected! Workers: {len(await client.scheduler_info()['workers'])}")
         return client
     except Exception as e:
         print(f"Warning: Could not connect to Dask scheduler: {e}")
@@ -339,8 +339,9 @@ async def convert_pff_to_tensorstore_dask(
     if use_dask:
         # DASK DISTRIBUTED APPROACH
         print(f"\nUsing Dask distributed processing")
-        print(f"Workers: {len(client.scheduler_info()['workers'])}")
-        num_workers_available = len(client.scheduler_info()['workers'])
+        worker_info = await client.scheduler_info()
+        num_workers_available = len(worker_info['workers'])
+        print(f"Workers: {num_workers_available}")
         work_chunks = []
         for worker_id in range(num_workers_available):
             byte_start = (file_size * worker_id) // num_workers_available
@@ -352,14 +353,9 @@ async def convert_pff_to_tensorstore_dask(
             ))
         print(f"Created {len(work_chunks)} work chunks\n")
         futures = client.map(read_sequential_chunk_worker, work_chunks)
-        results = []
-        for future in futures:
-            imgs, ts_batch, header_list, start_frame = await future
-            n = len(imgs)
-            if n > 0:
-                results.append((imgs, ts_batch, header_list, start_frame))
-        results.sort(key=lambda x: x[3])
-        for imgs, ts_batch, header_list, start_frame in results:
+        gathered = await client.gather(futures)  # Properly gather all results
+        for result in gathered:
+            imgs, ts_batch, header_list, start_frame = result
             n = len(imgs)
             task = asyncio.create_task(flush_batch(imgs, ts_batch, header_list, n, start_frame))
             pending_writes.append(task)
