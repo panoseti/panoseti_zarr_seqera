@@ -9,6 +9,12 @@
 #
 # Example: ./run.sh file1.pff file2.pff /path/to/output/L1
 
+export BLOSC_NTHREADS=8
+export TS_CODEC=zstd
+export TS_LEVEL=3
+export TS_CHUNK=65536
+export TS_CONCURRENT=12
+
 set -e  # Exit on error
 set -u  # Exit on undefined variable
 
