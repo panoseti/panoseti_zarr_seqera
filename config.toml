@@ -1,50 +1,50 @@
 # PANOSETI PFF to Zarr Conversion Configuration
-# HIGH PERFORMANCE PROFILE
+# HIGH PERFORMANCE PROFILE WITH DASK DISTRIBUTED COMPUTING
 # 
 # Optimized for:
+# - Multi-node distributed processing via Dask
 # - Maximum throughput on BeeGFS/HDD
-# - High CPU core utilization (8+ cores)
+# - High CPU core utilization across cluster
 # - Good compression ratio (blosc-lz4 level 5)
-# - Large sequential I/O operations
 
 [pff_to_zarr]
 
 # Compression Settings
-# blosc-lz4 is fast and gives good compression
-# Level 5 provides a balance: ~2-3x compression with minimal speed impact
-codec = "zstd"
-level = 3  # Increased from 1 for better compression (still fast)
+codec = "blosc-lz4"
+level = 5
 
 # Zarr Chunking
-# Larger chunks = better compression and fewer operations
-# 65536 frames @ ~2KB/frame = ~128 MB per chunk (optimal for large files)
-time_chunk = 16384
+time_chunk = 65536
 
-# CPU Parallelism
-# Maximize core utilization for your 8-core Xeon E5620
-num_workers = 12  # Slightly oversubscribed for better CPU saturation
-blosc_threads = 16  # Match physical cores for compression
+# Dask Distributed Computing
+use_dask = true  # Set to false to use local multiprocessing instead
+dask_scheduler_address = ""  # Empty = create SSH cluster, or provide address like "tcp://10.0.1.2:8786"
 
-# Async I/O Concurrency
-# Higher concurrency keeps I/O busy while CPU compresses
-max_concurrent_writes = 16  # Increased for better pipeline utilization
+# SSH Cluster Configuration (used when dask_scheduler_address is empty)
+ssh_hosts = ["localhost", "panoseti-dfs0", "panoseti-dfs1", "panoseti-dfs2"]  # List of SSH hostnames
+ssh_workers_per_host = 1  # Number of workers per host
+ssh_threads_per_worker = 16  # Threads per worker
+ssh_memory_per_worker = "16GB"  # Memory limit per worker
 
-# HDD/BeeGFS Optimization
-# Large sequential reads maximize disk throughput
-# 150 MB per worker = optimal for BeeGFS stripe utilization
+# Local Multiprocessing (used when use_dask = false)
+num_workers = 10
+blosc_threads = 8
+max_concurrent_writes = 16
 chunk_size_mb = 150
 
-# Notes:
-# - This config uses ~1.5-2 GB RAM (10 workers ×? 150 MB + compression buffers)
-# - Expected throughput: 100-300 MB/s on BeeGFS
-# - Expected compression: 2-3x (blosc-lz4 level 5)
-# - CPU utilization: 700-800% (all 8 cores saturated)
-
 [baseline_subtract]
-baseline_window = 100
-codec = "zstd"
-level = 3
 
-# Zarr Chunking (can be different from L0 if needed)
-# Uncomment and set a value to override input chunks, or leave commented to use input chunks
-# time_chunk = 65536
+# Step 2 (L0 -> L1) Configuration
+
+baseline_window = 100
+
+# Compression Settings
+codec = "blosc-lz4"
+level = 5
+
+# Dask Distributed Computing
+use_dask = true
+dask_scheduler_address = ""  # Empty = reuse cluster from step 1
+
+# Computation Settings
+compute_chunk_size = 8192  # Frames to process at once

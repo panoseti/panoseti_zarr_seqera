@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
 
 """
+Step 1: Convert L0 PFF-formatted data to L0 Zarr-formatted data using Dask distributed computing
 
-Step 1: Convert L0 PFF-formatted data to L0 Zarr-formatted data using TensorStore
-
-PARALLEL PFF READING - HDD/BeeGFS OPTIMIZED WITH CONFIG FILE SUPPORT
-
-Features:
-- Each worker reads ONE LARGE SEQUENTIAL CHUNK (optimal for HDDs/BeeGFS)
-- Accurate progress tracking with tqdm
-- TOML configuration file support
-- Multi-threaded blosc compression
-- Async TensorStore writes
-
+NEW: Dask Distributed Support
+- Can use SSH cluster to distribute work across multiple nodes
+- Falls back to local multiprocessing if Dask is disabled
+- Optimized for BeeGFS with large sequential reads
 """
 
 import os
@@ -30,17 +24,21 @@ from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import cpu_count
 import pff
+import dask
+import dask.array as da
+from dask.distributed import Client, SSHCluster, LocalCluster
+from dask.diagnostics import ProgressBar
 
 # Try to import tomli/tomllib for TOML support
 try:
     import tomllib  # Python 3.11+
 except ImportError:
     try:
-        import tomli as tomllib  # Fallback for older Python
+        import tomli as tomllib
     except ImportError:
         tomllib = None
 
-# Configure Blosc for multi-threading
+# Configure Blosc
 try:
     import blosc
     num_cores = os.cpu_count() or 4
@@ -204,7 +202,7 @@ def parse_frames_from_buffer(buffer: bytes, header_size: int, img_data_size: int
     return imgs, timestamps, headers
 
 def read_sequential_chunk_worker(args):
-    """Worker function optimized for HDDs and BeeGFS - reads one large sequential chunk"""
+    """Worker function for reading sequential chunks (HDD-optimized)"""
     pff_path, byte_start, byte_end, header_size, img_data_size, frame_size, \
         W, np_img_dtype, header_kind, start_frame_hint = args
 
@@ -224,25 +222,78 @@ def read_sequential_chunk_worker(args):
 
     return imgs, timestamps, headers, start_frame_hint
 
-async def convert_pff_to_tensorstore(
+async def setup_dask_cluster(config: dict):
+    """
+    Set up Dask cluster based on configuration.
+
+    Returns:
+    --------
+    client : dask.distributed.Client
+        Dask client connected to cluster
+    cluster : dask.distributed.Cluster or None
+        Cluster object if created, None if connecting to existing
+    """
+    use_dask = config.get('use_dask', False)
+
+    if not use_dask:
+        print("Dask disabled - using local multiprocessing")
+        return None, None
+
+    scheduler_address = config.get('dask_scheduler_address', '')
+
+    if scheduler_address:
+        # Connect to existing scheduler
+        print(f"Connecting to existing Dask scheduler: {scheduler_address}")
+        client = await Client(scheduler_address, asynchronous=True)
+        return client, None
+
+    # Create SSH cluster
+    ssh_hosts = config.get('ssh_hosts', ['localhost'])
+    workers_per_host = config.get('ssh_workers_per_host', 1)
+    threads_per_worker = config.get('ssh_threads_per_worker', 16)
+    memory_per_worker = config.get('ssh_memory_per_worker', '16GB')
+
+    print(f"\nCreating Dask SSH Cluster:")
+    print(f"  Hosts: {ssh_hosts}")
+    print(f"  Workers per host: {workers_per_host}")
+    print(f"  Threads per worker: {threads_per_worker}")
+    print(f"  Memory per worker: {memory_per_worker}")
+
+    # Preload command to set umask
+    preload_command = "import os; os.umask(0o000)"
+
+    cluster = await SSHCluster(
+        hosts=ssh_hosts * workers_per_host,  # Repeat hosts for multiple workers
+        connect_options={"known_hosts": None},
+        worker_options={
+            "nthreads": threads_per_worker,
+            "memory_limit": memory_per_worker,
+        },
+        scheduler_options={
+            "port": 0,
+            "dashboard_address": ":8797",
+        },
+        asynchronous=True
+    )
+
+    client = await Client(cluster, asynchronous=True)
+
+    print(f"\nDask cluster ready!")
+    print(f"  Dashboard: {client.dashboard_link}")
+    print(f"  Workers: {len(client.scheduler_info()['workers'])}")
+    print(f"  Total cores: {sum(w['nthreads'] for w in client.scheduler_info()['workers'].values())}")
+    print()
+
+    return client, cluster
+
+async def convert_pff_to_tensorstore_dask(
     pff_path: str,
     zarr_root: str,
     config: dict,
+    client = None
 ):
     """
-    Convert PFF to Zarr using PARALLEL SEQUENTIAL READING.
-
-    Parameters:
-    -----------
-    config : dict
-        Configuration dictionary with keys:
-        - codec: Compression codec
-        - level: Compression level
-        - time_chunk: Frames per Zarr chunk
-        - max_concurrent_writes: Max concurrent async writes
-        - num_workers: Number of parallel workers
-        - chunk_size_mb: MB per sequential read
-        - blosc_threads: Number of blosc threads
+    Convert PFF to Zarr using Dask distributed computing or local multiprocessing.
     """
     if not os.path.exists(pff_path):
         raise FileNotFoundError(pff_path)
@@ -253,15 +304,6 @@ async def convert_pff_to_tensorstore(
         shutil.rmtree(zarr_root)
 
     root_group = zarr.open_group(zarr_root, mode='w')
-
-    # Configure blosc threads
-    try:
-        import blosc
-        blosc_threads = config.get('blosc_threads', os.cpu_count() or 4)
-        blosc.set_nthreads(blosc_threads)
-        print(f"Blosc configured to use {blosc_threads} threads for compression")
-    except ImportError:
-        print("Warning: python-blosc not installed")
 
     name_parts, dp, bpp, img_hw, np_img_dtype, bytes_per_image, header_kind = _infer_dp_from_name(pff_path)
 
@@ -278,17 +320,10 @@ async def convert_pff_to_tensorstore(
     print(f"  Total frames:   {nframes}")
 
     file_size = os.path.getsize(pff_path)
-    chunk_size_mb = config.get('chunk_size_mb', 50)
-    chunk_size_bytes = chunk_size_mb * 1024 * 1024
-    frames_per_chunk = chunk_size_bytes // frame_size
-
-    print(f"\nOptimized for HDD/BeeGFS:")
-    print(f"  Sequential chunk size: {chunk_size_mb} MB ({frames_per_chunk} frames)")
-    print(f"  Each worker: 1 large sequential read (no seeks)")
 
     codec = config.get('codec', 'blosc-lz4')
-    level = config.get('level', 1)
-    time_chunk = config.get('time_chunk', 32768)
+    level = config.get('level', 5)
+    time_chunk = config.get('time_chunk', 65536)
     max_concurrent_writes = config.get('max_concurrent_writes', 12)
 
     print(f"\nCreating Zarr group at: {zarr_root}")
@@ -352,8 +387,7 @@ async def convert_pff_to_tensorstore(
     pff_file_size = os.path.getsize(pff_path)
     start = time.monotonic()
 
-    # ACCURATE PROGRESS BAR: Track frames written
-    pbar = tqdm(total=T, desc="Converting PFF -> Zarr (HDD OPTIMIZED)", unit="frames", 
+    pbar = tqdm(total=T, desc="Converting PFF -> Zarr (DASK DISTRIBUTED)", unit="frames", 
                 smoothing=0.1, dynamic_ncols=True)
 
     frames_written = 0
@@ -361,7 +395,7 @@ async def convert_pff_to_tensorstore(
     semaphore = asyncio.Semaphore(max_concurrent_writes)
 
     async def flush_batch(img_batch, ts_batch, header_list, n, start_frame):
-        """Flush batch with concurrency control and progress tracking"""
+        """Flush batch with concurrency control"""
         nonlocal frames_written
         if n == 0:
             return
@@ -394,36 +428,39 @@ async def convert_pff_to_tensorstore(
             if write_futures:
                 await asyncio.gather(*write_futures)
 
-            # Update progress bar AFTER write completes
             pbar.update(n)
             frames_written += n
 
-    num_workers = config.get('num_workers', None)
-    if num_workers is None:
-        num_workers = min(cpu_count(), 8)
+    use_dask = config.get('use_dask', False) and client is not None
 
-    print(f"\nReading with {num_workers} parallel workers...")
-    print(f"Each worker reads ~{file_size / num_workers / (1024**2):.1f} MB sequentially")
+    if use_dask:
+        # DASK DISTRIBUTED APPROACH
+        print(f"\nUsing Dask distributed processing")
+        print(f"Workers: {len(client.scheduler_info()['workers'])}")
 
-    work_chunks = []
-    for worker_id in range(num_workers):
-        byte_start = (file_size * worker_id) // num_workers
-        byte_end = (file_size * (worker_id + 1)) // num_workers if worker_id < num_workers - 1 else file_size
-        start_frame_hint = (byte_start // frame_size)
+        # Split work across Dask workers
+        num_workers_available = len(client.scheduler_info()['workers'])
 
-        work_chunks.append((
-            pff_path, byte_start, byte_end, header_size, img_data_size, frame_size,
-            W, np_img_dtype, header_kind, start_frame_hint
-        ))
+        work_chunks = []
+        for worker_id in range(num_workers_available):
+            byte_start = (file_size * worker_id) // num_workers_available
+            byte_end = (file_size * (worker_id + 1)) // num_workers_available if worker_id < num_workers_available - 1 else file_size
+            start_frame_hint = (byte_start // frame_size)
 
-    print(f"Created {len(work_chunks)} work chunks\n")
+            work_chunks.append((
+                pff_path, byte_start, byte_end, header_size, img_data_size, frame_size,
+                W, np_img_dtype, header_kind, start_frame_hint
+            ))
 
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(read_sequential_chunk_worker, chunk) for chunk in work_chunks]
+        print(f"Created {len(work_chunks)} work chunks\n")
 
+        # Submit work to Dask
+        futures = client.map(read_sequential_chunk_worker, work_chunks)
+
+        # Gather results
         results = []
         for future in futures:
-            imgs, ts_batch, header_list, start_frame = future.result()
+            imgs, ts_batch, header_list, start_frame = await future
             n = len(imgs)
             if n > 0:
                 results.append((imgs, ts_batch, header_list, start_frame))
@@ -437,6 +474,46 @@ async def convert_pff_to_tensorstore(
 
             while len(pending_writes) >= max_concurrent_writes:
                 await pending_writes.popleft()
+
+    else:
+        # LOCAL MULTIPROCESSING APPROACH (original)
+        num_workers = config.get('num_workers', min(cpu_count(), 8))
+        chunk_size_mb = config.get('chunk_size_mb', 150)
+
+        print(f"\nUsing local multiprocessing")
+        print(f"Workers: {num_workers}")
+        print(f"Chunk size: {chunk_size_mb} MB\n")
+
+        work_chunks = []
+        for worker_id in range(num_workers):
+            byte_start = (file_size * worker_id) // num_workers
+            byte_end = (file_size * (worker_id + 1)) // num_workers if worker_id < num_workers - 1 else file_size
+            start_frame_hint = (byte_start // frame_size)
+
+            work_chunks.append((
+                pff_path, byte_start, byte_end, header_size, img_data_size, frame_size,
+                W, np_img_dtype, header_kind, start_frame_hint
+            ))
+
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(read_sequential_chunk_worker, chunk) for chunk in work_chunks]
+
+            results = []
+            for future in futures:
+                imgs, ts_batch, header_list, start_frame = future.result()
+                n = len(imgs)
+                if n > 0:
+                    results.append((imgs, ts_batch, header_list, start_frame))
+
+            results.sort(key=lambda x: x[3])
+
+            for imgs, ts_batch, header_list, start_frame in results:
+                n = len(imgs)
+                task = asyncio.create_task(flush_batch(imgs, ts_batch, header_list, n, start_frame))
+                pending_writes.append(task)
+
+                while len(pending_writes) >= max_concurrent_writes:
+                    await pending_writes.popleft()
 
     while pending_writes:
         await pending_writes.popleft()
@@ -467,9 +544,8 @@ async def convert_pff_to_tensorstore(
         "pff_size_MB": round(pff_file_size / (1024**2), 2),
         "zarr_size_MB": round(zarr_size / (1024**2), 2),
         "compression_ratio": round(compression_ratio, 2),
-        "optimization": "HDD_SEQUENTIAL_PARALLEL",
-        "num_workers": num_workers,
-        "chunk_size_mb": chunk_size_mb,
+        "optimization": "DASK_DISTRIBUTED" if use_dask else "LOCAL_MULTIPROCESSING",
+        "num_workers": len(client.scheduler_info()['workers']) if use_dask and client else num_workers,
     }
     print("\n" + "="*60)
     print("Conversion Report:")
@@ -485,16 +561,20 @@ def load_config(config_path: str = None):
         'level': 1,
         'time_chunk': 32768,
         'max_concurrent_writes': 12,
-        'num_workers': None,  # Auto-detect
+        'num_workers': None,
         'chunk_size_mb': 50,
-        'blosc_threads': None,  # Auto-detect
+        'blosc_threads': None,
+        'use_dask': False,
+        'dask_scheduler_address': '',
+        'ssh_hosts': ['localhost'],
+        'ssh_workers_per_host': 1,
+        'ssh_threads_per_worker': 16,
+        'ssh_memory_per_worker': '16GB',
     }
 
-    # Load from TOML file if provided
     if config_path and os.path.exists(config_path):
         if tomllib is None:
             print(f"Warning: Cannot read {config_path} - tomli/tomllib not installed")
-            print("Install with: pip install tomli")
         else:
             with open(config_path, 'rb') as f:
                 toml_config = tomllib.load(f)
@@ -520,28 +600,18 @@ async def main():
     if len(sys.argv) < 3:
         print("Usage: python step1_pff_to_zarr.py <input.pff> <output.zarr> [config.toml]")
         print()
-        print("Arguments:")
-        print("  config.toml: Optional TOML configuration file")
+        print("NEW: Dask Distributed Computing Support")
+        print("  Configure in config.toml:")
+        print("    use_dask = true")
+        print("    ssh_hosts = ['host1', 'host2', 'host3']")
         print()
-        print("Configuration priority (highest to lowest):")
-        print("  1. Environment variables (TS_CODEC, TS_LEVEL, etc.)")
-        print("  2. TOML config file")
-        print("  3. Default values")
-        print()
-        print("Example config.toml:")
-        print("  [pff_to_zarr]")
-        print("  codec = 'blosc-lz4'")
-        print("  level = 1")
-        print("  time_chunk = 32768")
-        print("  max_concurrent_writes = 12")
-        print("  num_workers = 8")
-        print("  chunk_size_mb = 100")
-        print("  blosc_threads = 8")
+        print("  Or connect to existing scheduler:")
+        print("    dask_scheduler_address = 'tcp://10.0.1.2:8786'")
         sys.exit(1)
 
     pff_path = sys.argv[1]
     zarr_root = sys.argv[2]
-    config_path = sys.argv[3] if len(sys.argv) > 3 else None
+    config_path = sys.argv[3] if len(sys.argv) > 3 else "config.toml"
 
     config = load_config(config_path)
 
@@ -551,8 +621,17 @@ async def main():
             print(f"  {key}: {value}")
     print()
 
-    await convert_pff_to_tensorstore(pff_path, zarr_root, config)
+    # Set up Dask cluster if enabled
+    client, cluster = await setup_dask_cluster(config)
+
+    try:
+        await convert_pff_to_tensorstore_dask(pff_path, zarr_root, config, client)
+    finally:
+        # Clean up Dask resources
+        if client:
+            await client.close()
+        if cluster:
+            await cluster.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
-

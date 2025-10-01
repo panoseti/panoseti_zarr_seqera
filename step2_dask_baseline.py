@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
 """
+Step 2: Baseline subtraction using Dask distributed computing
 
-Step 2: Take L0 Zarr data product as input, perform baseline subtraction with Dask,
-and output L1 data product with configurable compression
-
+NEW: Dask Distributed Support
+- Can use existing Dask cluster from step 1
+- Distributes baseline computation across cluster nodes
+- Optimized for large Zarr arrays on BeeGFS
 """
 
 import os
@@ -16,13 +18,15 @@ import dask
 import dask.array as da
 from pathlib import Path
 import time
+from dask.distributed import Client, SSHCluster, LocalCluster, wait
+from dask.diagnostics import ProgressBar
 
-# Try to import tomli/tomllib for TOML support
+# Try to import tomli/tomllib
 try:
-    import tomllib  # Python 3.11+
+    import tomllib
 except ImportError:
     try:
-        import tomli as tomllib  # Fallback for older Python
+        import tomli as tomllib
     except ImportError:
         tomllib = None
 
@@ -32,7 +36,9 @@ def load_config(config_path: str = "config.toml"):
         'baseline_window': 100,
         'codec': 'blosc-lz4',
         'level': 5,
-        'time_chunk': None,  # None = use input chunks
+        'use_dask': False,
+        'dask_scheduler_address': '',
+        'compute_chunk_size': 8192,
     }
 
     if config_path and os.path.exists(config_path):
@@ -51,49 +57,83 @@ def load_config(config_path: str = "config.toml"):
 
     return config
 
-def baseline_subtract(zarr_input: str, zarr_output: str, config: dict):
+async def setup_dask_cluster(config: dict):
     """
-    Perform baseline subtraction on L0 Zarr data to produce L1 data product.
+    Set up or connect to Dask cluster.
 
-    Parameters:
-    -----------
-    zarr_input : str
-        Path to input L0 Zarr directory
-    zarr_output : str
-        Path to output L1 Zarr directory
-    config : dict
-        Configuration dictionary
+    Returns client or None if Dask is disabled.
+    """
+    use_dask = config.get('use_dask', False)
+
+    if not use_dask:
+        print("Dask disabled - using local threading")
+        return None
+
+    scheduler_address = config.get('dask_scheduler_address', '')
+
+    if scheduler_address:
+        # Connect to existing scheduler
+        print(f"Connecting to existing Dask scheduler: {scheduler_address}")
+        client = await Client(scheduler_address, asynchronous=True)
+        print(f"  Connected! Workers: {len(client.scheduler_info()['workers'])}")
+        return client
+
+    # If no scheduler address, user should have cluster from step 1
+    print("Warning: use_dask=true but no dask_scheduler_address provided")
+    print("         Either provide scheduler address or run step 1 first")
+    print("         Falling back to local processing")
+    return None
+
+def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict, client=None):
+    """
+    Perform baseline subtraction using Dask distributed computing.
     """
     baseline_window = config.get('baseline_window', 100)
     codec = config.get('codec', 'blosc-lz4')
     level = config.get('level', 5)
-    time_chunk = config.get('time_chunk', None)
+    compute_chunk_size = config.get('compute_chunk_size', 8192)
 
     print(f"Loading L0 data from: {zarr_input}")
     start = time.time()
 
-    # Open the L0 Zarr dataset
+    # Open the L0 Zarr dataset with Dask arrays
     ds = xr.open_dataset(
         zarr_input,
         engine='zarr',
         chunks={},  # Use existing chunks
-        consolidated=False  # Suppress warning about consolidated metadata
+        consolidated=False
     )
 
     print(f"Dataset loaded in {time.time() - start:.2f}s")
     print(f"Dataset shape: {ds.images.shape}")
     print(f"Dataset chunks: {ds.images.chunks}")
 
-    # Perform baseline subtraction
+    # Check if we have a Dask client
+    use_distributed = client is not None
+
+    if use_distributed:
+        print(f"\nUsing Dask distributed computing")
+        print(f"Workers: {len(client.scheduler_info()['workers'])}")
+        print(f"Total cores: {sum(w['nthreads'] for w in client.scheduler_info()['workers'].values())}")
+    else:
+        print(f"\nUsing local Dask threading")
+
+    # Perform baseline subtraction with Dask
     print(f"\nCalculating baseline (window={baseline_window})...")
     images_da = ds.images.data  # Get dask array
 
     # Calculate baseline - mean of first N frames
+    # This creates a lazy computation graph
     baseline = images_da[:baseline_window].mean(axis=0, keepdims=True)
 
-    # Subtract baseline
-    print("Subtracting baseline...")
+    # Subtract baseline (lazy)
+    print("Subtracting baseline (lazy computation)...")
     images_corrected = images_da - baseline
+
+    # Rechunk for better performance if needed
+    if compute_chunk_size != ds.images.chunks[0][0]:
+        print(f"Rechunking from {ds.images.chunks[0][0]} to {compute_chunk_size} frames per chunk...")
+        images_corrected = images_corrected.rechunk({0: compute_chunk_size, 1: -1, 2: -1})
 
     # Create output dataset
     ds_out = xr.Dataset(
@@ -118,50 +158,11 @@ def baseline_subtract(zarr_input: str, zarr_output: str, config: dict):
         import shutil
         shutil.rmtree(zarr_output)
 
-    # Determine chunks for output
-    if time_chunk is not None:
-        output_chunks = (time_chunk, ds.images.shape[1], ds.images.shape[2])
-    else:
-        # Use input chunks
-        if hasattr(ds.images, 'chunks') and ds.images.chunks:
-            output_chunks = tuple(c[0] if isinstance(c, tuple) else c for c in ds.images.chunks)
-        else:
-            output_chunks = None
-
-    # For Zarr v3 with xarray, we need to use the codec specification format
-    # that xarray's zarr backend understands
-    # The issue is that xarray expects different compression format for Zarr v3
-
-    # Build codec specification for Zarr v3
-    if codec == 'blosc-lz4':
-        # Use dict format that zarr v3 understands
-        codec_config = {
-            'id': 'blosc',
-            'cname': 'lz4',
-            'clevel': level,
-            'shuffle': 1  # SHUFFLE
-        }
-    elif codec == 'zstd':
-        codec_config = {
-            'id': 'zstd',
-            'level': level
-        }
-    elif codec == 'gzip':
-        codec_config = {
-            'id': 'gzip',
-            'level': level
-        }
-    else:
-        codec_config = None
-
-    # For xarray's zarr backend, we can specify compressor settings via encoding
-    # But we need to be careful about the format
-    # Let's use the approach of letting xarray handle defaults and then
-    # specify chunks and dtype only
-
+    # Build encoding dict
     encoding = {
         'images': {
-            'chunks': output_chunks,
+            'chunks': tuple(images_corrected.chunks[0][0] if isinstance(images_corrected.chunks[0], tuple) 
+                          else images_corrected.chunks[0] for _ in [0]) + (ds.images.shape[1], ds.images.shape[2]),
             'dtype': ds.images.dtype,
         },
         'timestamps': {
@@ -172,16 +173,34 @@ def baseline_subtract(zarr_input: str, zarr_output: str, config: dict):
     # Write with progress
     write_start = time.time()
 
-    # For now, write without explicit compressor in encoding
-    # xarray will use zarr's default compressor (Blosc with default settings)
-    # We can improve this later by using zarr directly instead of xarray
-    ds_out.to_zarr(
-        zarr_output,
-        mode='w',
-        encoding=encoding,
-        compute=True,
-        consolidated=True
-    )
+    if use_distributed:
+        # Use Dask distributed compute
+        print("Computing with Dask cluster...")
+
+        # This triggers the actual computation across the cluster
+        future = ds_out.to_zarr(
+            zarr_output,
+            mode='w',
+            encoding=encoding,
+            compute=False,  # Return dask delayed object
+            consolidated=True
+        )
+
+        # Compute using the client
+        result = client.compute(future, sync=True)
+
+    else:
+        # Use local Dask with progress bar
+        print("Computing locally with Dask...")
+
+        with ProgressBar():
+            ds_out.to_zarr(
+                zarr_output,
+                mode='w',
+                encoding=encoding,
+                compute=True,
+                consolidated=True
+            )
 
     write_time = time.time() - write_start
     total_time = time.time() - start
@@ -211,14 +230,12 @@ def baseline_subtract(zarr_input: str, zarr_output: str, config: dict):
     print(f"  Compression ratio: {compression_ratio:.2f}x")
     print(f"  Space savings: {(1 - output_size/input_size)*100:.1f}%")
 
-    # Note about compression
-    print(f"\nNote: xarray's zarr backend uses zarr's default Blosc compression.")
-    print(f"      Configured compression (codec={codec}, level={level}) will be")
-    print(f"      used in a future update when xarray fully supports Zarr v3 API.")
+    print(f"\nNote: Compression is handled by Zarr's default settings.")
+    print(f"      xarray + Zarr v3 currently have limited codec control.")
 
-def main():
+async def main_async():
     parser = argparse.ArgumentParser(
-        description='Apply baseline subtraction to L0 Zarr data to create L1 product',
+        description='Apply baseline subtraction with Dask distributed computing',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
@@ -248,6 +265,13 @@ def main():
         help='Number of frames for baseline (overrides config)'
     )
 
+    parser.add_argument(
+        '--dask-scheduler',
+        type=str,
+        default=None,
+        help='Dask scheduler address (overrides config)'
+    )
+
     args = parser.parse_args()
 
     if not os.path.exists(args.input_zarr):
@@ -260,14 +284,30 @@ def main():
     # Override with command-line arguments
     if args.baseline_window is not None:
         config['baseline_window'] = args.baseline_window
+    if args.dask_scheduler is not None:
+        config['dask_scheduler_address'] = args.dask_scheduler
+        config['use_dask'] = True
 
     print(f"\nConfiguration:")
     for key, value in config.items():
         print(f"  {key}: {value}")
     print()
 
-    baseline_subtract(args.input_zarr, args.output_zarr, config)
+    # Set up Dask cluster if enabled
+    client = await setup_dask_cluster(config)
+
+    try:
+        # Run baseline subtraction
+        baseline_subtract_dask(args.input_zarr, args.output_zarr, config, client)
+    finally:
+        # Clean up Dask client (but don't close cluster - it might be from step 1)
+        if client:
+            await client.close()
+
+def main():
+    """Synchronous wrapper for async main"""
+    import asyncio
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
-
