@@ -252,11 +252,11 @@ SCHEDULER_ADDRESS=$(cat "${SCHEDULER_FILE}")
 
 if [ -z "${SCHEDULER_ADDRESS}" ]; then
     echo "No Dask cluster - using local processing"
-    SCHEDULER_ARG=""
+    USE_CLUSTER=false
 else
     echo "✓ Cluster ready!"
     echo "  Scheduler address: ${SCHEDULER_ADDRESS}"
-    SCHEDULER_ARG="${SCHEDULER_ADDRESS}"
+    USE_CLUSTER=true
 fi
 echo ""
 
@@ -291,18 +291,10 @@ for pff_file in "${INPUT_FILES[@]}"; do
     echo "  Output: ${L0_ZARR}"
     echo ""
 
-    if [ -z "${SCHEDULER_ARG}" ]; then
-        if ! python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}" "${CONFIG_FILE}"; then
-            echo "ERROR: Step 1 failed for ${pff_file}"
-            PROCESSING_FAILED=1
-            break
-        fi
+    if [ "$USE_CLUSTER" = true ]; then
+        python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}" "${CONFIG_FILE}" "${SCHEDULER_ADDRESS}"
     else
-        if ! python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}" "${CONFIG_FILE}" "${SCHEDULER_ARG}"; then
-            echo "ERROR: Step 1 failed for ${pff_file}"
-            PROCESSING_FAILED=1
-            break
-        fi
+        python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}" "${CONFIG_FILE}"
     fi
 
     echo ""
