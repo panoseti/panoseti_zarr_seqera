@@ -91,6 +91,7 @@ async def create_dask_cluster(config: dict):
     # Repeat hosts for multiple workers per host
     all_hosts = ssh_hosts * workers_per_host
     expected_workers = max(len(all_hosts) - 1, 0)
+    preload_command = "import os; os.umask(0o000)"
 
     cluster = await SSHCluster(
         hosts=all_hosts,
@@ -98,12 +99,12 @@ async def create_dask_cluster(config: dict):
         worker_options={
             "nthreads": threads_per_worker,
             "memory_limit": memory_per_worker,
-            "preload": preload,  # Run worker_preload.py on each worker startup
+            "preload": [preload_command],  # Run worker_preload.py on each worker startup
         },
         scheduler_options={
             "port": 0,
             "dashboard_address": ":8797",
-            "preload": preload,  # Also set on scheduler
+            "preload": [preload_command],  # Also set on scheduler
         },
         asynchronous=True
     )
