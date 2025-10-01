@@ -55,7 +55,7 @@ async def connect_to_dask(scheduler_address: str):
     if not scheduler_address:
         print("No Dask scheduler address provided - using local threading")
         return None
-    
+
     try:
         print(f"Connecting to Dask scheduler: {scheduler_address}")
         client = await Client(scheduler_address, asynchronous=True)
@@ -75,10 +75,10 @@ async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict
     codec = config.get('codec', 'blosc-lz4')
     level = config.get('level', 5)
     compute_chunk_size = config.get('compute_chunk_size', 8192)
-    
+
     print(f"Loading L0 data from: {zarr_input}")
     start = time.time()
-    
+
     # Open the L0 Zarr dataset with Dask arrays
     ds = xr.open_dataset(
         zarr_input,
@@ -86,11 +86,11 @@ async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict
         chunks={},  # Use existing chunks
         consolidated=False
     )
-    
+
     print(f"Dataset loaded in {time.time() - start:.2f}s")
     print(f"Dataset shape: {ds.images.shape}")
     print(f"Dataset chunks: {ds.images.chunks}")
-    
+
     # Check if we have a Dask client
     use_distributed = client is not None
     if use_distributed:
@@ -100,23 +100,23 @@ async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict
         print(f"Total cores: {sum(w['nthreads'] for w in worker_info['workers'].values())}")
     else:
         print(f"\nUsing local Dask threading")
-    
+
     # Perform baseline subtraction with Dask
     print(f"\nCalculating baseline (window={baseline_window})...")
     images_da = ds.images.data  # Get dask array
-    
+
     # Calculate baseline - mean of first N frames
     baseline = images_da[:baseline_window].mean(axis=0, keepdims=True)
-    
+
     # Subtract baseline (lazy)
     print("Subtracting baseline (lazy computation)...")
     images_corrected = images_da - baseline
-    
+
     # Rechunk for better performance if needed
     if compute_chunk_size != ds.images.chunks[0][0]:
         print(f"Rechunking from {ds.images.chunks[0][0]} to {compute_chunk_size} frames per chunk...")
         images_corrected = images_corrected.rechunk({0: compute_chunk_size, 1: -1, 2: -1})
-    
+
     # Create output dataset
     ds_out = xr.Dataset(
         {
@@ -130,16 +130,16 @@ async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict
             'baseline_method': 'mean_of_first_n_frames',
         }
     )
-    
+
     # Save to Zarr with compression
     print(f"\nWriting L1 data to: {zarr_output}")
     print(f"Using compression: {codec} level {level}")
-    
+
     # Remove existing output if it exists
     if os.path.exists(zarr_output):
         import shutil
         shutil.rmtree(zarr_output)
-    
+
     # Build encoding dict
     encoding = {
         'images': {
@@ -151,13 +151,13 @@ async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict
             'dtype': ds.timestamps.dtype,
         }
     }
-    
+
     # Write with progress
     write_start = time.time()
     if use_distributed:
-        # Use Dask distributed compute - FIXED: properly handle async
+        # Use Dask distributed compute - need to handle async properly
         print("Computing with Dask cluster...")
-        
+
         # Get the delayed write operation
         delayed = ds_out.to_zarr(
             zarr_output,
@@ -166,11 +166,13 @@ async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict
             compute=False,
             consolidated=True
         )
-        
-        # Compute using async client - FIXED: await gather
+
+        # Compute using async client
         futures = client.compute(delayed)
+
+        # Wait for completion
         result = await client.gather(futures)
-        
+
     else:
         # Use local Dask with progress bar
         print("Computing locally with Dask...")
@@ -182,15 +184,15 @@ async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict
                 compute=True,
                 consolidated=True
             )
-    
+
     write_time = time.time() - write_start
     total_time = time.time() - start
-    
+
     print(f"\nProcessing complete!")
     print(f"Write time: {write_time:.2f}s")
     print(f"Total time: {total_time:.2f}s")
     print(f"Output: {zarr_output}")
-    
+
     # Print output size and compression info
     def get_dir_size(path):
         total = 0
@@ -200,11 +202,11 @@ async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict
                 if os.path.exists(fp):
                     total += os.path.getsize(fp)
         return total
-    
+
     input_size = get_dir_size(zarr_input)
     output_size = get_dir_size(zarr_output)
     compression_ratio = input_size / output_size if output_size > 0 else 0
-    
+
     print(f"\nCompression Statistics:")
     print(f"  Input size (L0): {input_size / 1e6:.2f} MB")
     print(f"  Output size (L1): {output_size / 1e6:.2f} MB")
@@ -224,30 +226,30 @@ async def main_async():
                        help='Number of frames for baseline (overrides config)')
     parser.add_argument('--dask-scheduler', type=str, default=None,
                        help='Dask scheduler address')
-    
+
     args = parser.parse_args()
-    
+
     if not os.path.exists(args.input_zarr):
         print(f"Error: Input path does not exist: {args.input_zarr}")
         sys.exit(1)
-    
+
     # Load config
     config = load_config(args.config)
-    
+
     # Override with command-line arguments
     if args.baseline_window is not None:
         config['baseline_window'] = args.baseline_window
-    
+
     print(f"\nConfiguration:")
     for key, value in config.items():
         print(f"  {key}: {value}")
     print()
-    
+
     # Connect to Dask cluster if scheduler provided
     client = None
     if args.dask_scheduler:
         client = await connect_to_dask(args.dask_scheduler)
-    
+
     try:
         await baseline_subtract_dask(args.input_zarr, args.output_zarr, config, client)
     finally:

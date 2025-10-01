@@ -4,6 +4,7 @@
 Step 1: Convert L0 PFF-formatted data to L0 Zarr-formatted data using Dask distributed computing
 
 UPDATED: Now accepts existing Dask scheduler address instead of creating cluster
+FIXED: Proper async/await handling for Dask client operations
 """
 
 import os
@@ -16,7 +17,6 @@ import numpy as np
 import tensorstore as ts
 from tqdm import tqdm
 import time
-import cluster_manager
 from pathlib import Path
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
@@ -203,11 +203,12 @@ async def connect_to_dask(scheduler_address: str):
     if not scheduler_address:
         print("No Dask scheduler address provided - using local multiprocessing")
         return None
-    
+
     try:
         print(f"Connecting to Dask scheduler: {scheduler_address}")
         client = await Client(scheduler_address, asynchronous=True)
-        print(f"  ✓ Connected! Workers: {len(await client.scheduler_info()['workers'])}")
+        worker_info = await client.scheduler_info()
+        print(f"  ✓ Connected! Workers: {len(worker_info['workers'])}")
         return client
     except Exception as e:
         print(f"Warning: Could not connect to Dask scheduler: {e}")
@@ -342,6 +343,7 @@ async def convert_pff_to_tensorstore_dask(
         worker_info = await client.scheduler_info()
         num_workers_available = len(worker_info['workers'])
         print(f"Workers: {num_workers_available}")
+
         work_chunks = []
         for worker_id in range(num_workers_available):
             byte_start = (file_size * worker_id) // num_workers_available
@@ -352,10 +354,21 @@ async def convert_pff_to_tensorstore_dask(
                 W, np_img_dtype, header_kind, start_frame_hint
             ))
         print(f"Created {len(work_chunks)} work chunks\n")
+
+        # Submit work to cluster
         futures = client.map(read_sequential_chunk_worker, work_chunks)
-        gathered = await client.gather(futures)  # Properly gather all results
+
+        # Gather results - properly await the async gather
+        results = []
+        gathered = await client.gather(futures)
         for result in gathered:
             imgs, ts_batch, header_list, start_frame = result
+            n = len(imgs)
+            if n > 0:
+                results.append((imgs, ts_batch, header_list, start_frame))
+
+        results.sort(key=lambda x: x[3])
+        for imgs, ts_batch, header_list, start_frame in results:
             n = len(imgs)
             task = asyncio.create_task(flush_batch(imgs, ts_batch, header_list, n, start_frame))
             pending_writes.append(task)
@@ -469,29 +482,30 @@ async def main():
         print("  config.toml       - Configuration file (optional)")
         print("  scheduler_address - Dask scheduler address (optional, e.g. tcp://10.0.1.2:8786)")
         sys.exit(1)
-    
+
     pff_path = sys.argv[1]
     zarr_root = sys.argv[2]
     config_path = sys.argv[3] if len(sys.argv) > 3 else "config.toml"
     scheduler_address = sys.argv[4] if len(sys.argv) > 4 else ""
-    
+
     config = load_config(config_path)
     print("Configuration:")
     for key, value in config.items():
         if value is not None:
             print(f"  {key}: {value}")
     print()
-    
+
     # Connect to existing Dask cluster if address provided
     client = None
     if scheduler_address:
         client = await connect_to_dask(scheduler_address)
-    
+
     try:
         await convert_pff_to_tensorstore_dask(pff_path, zarr_root, config, client)
     finally:
         # Close client connection (but don't shutdown cluster)
         if client:
+            print("  Keeping cluster alive for next task...")
             await client.close()
 
 if __name__ == "__main__":
