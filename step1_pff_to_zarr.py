@@ -207,7 +207,7 @@ async def connect_to_dask(scheduler_address: str):
     try:
         print(f"Connecting to Dask scheduler: {scheduler_address}")
         client = await Client(scheduler_address, asynchronous=True)
-        worker_info = await client.scheduler_info()
+        worker_info = client.scheduler_info()
         print(f"  ✓ Connected! Workers: {len(worker_info['workers'])}")
         return client
     except Exception as e:
@@ -340,7 +340,7 @@ async def convert_pff_to_tensorstore_dask(
     if use_dask:
         # DASK DISTRIBUTED APPROACH
         print(f"\nUsing Dask distributed processing")
-        worker_info = await client.scheduler_info()
+        worker_info = client.scheduler_info()
         num_workers_available = len(worker_info['workers'])
         print(f"Workers: {num_workers_available}")
 

@@ -59,7 +59,7 @@ async def connect_to_dask(scheduler_address: str):
     try:
         print(f"Connecting to Dask scheduler: {scheduler_address}")
         client = await Client(scheduler_address, asynchronous=True)
-        worker_info = await client.scheduler_info()
+        worker_info = client.scheduler_info()
         print(f"  ✓ Connected! Workers: {len(worker_info['workers'])}")
         return client
     except Exception as e:
@@ -94,7 +94,7 @@ async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict
     # Check if we have a Dask client
     use_distributed = client is not None
     if use_distributed:
-        worker_info = await client.scheduler_info()
+        worker_info = client.scheduler_info()
         print(f"\nUsing Dask distributed computing")
         print(f"Workers: {len(worker_info['workers'])}")
         print(f"Total cores: {sum(w['nthreads'] for w in worker_info['workers'].values())}")

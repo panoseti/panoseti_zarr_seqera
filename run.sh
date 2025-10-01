@@ -223,14 +223,13 @@ echo "Cluster manager started (PID: $CLUSTER_PID)"
 
 # Wait for scheduler file to be created with timeout
 echo "Waiting for cluster to initialize..."
-MAX_WAIT=3
+MAX_WAIT=45
 for i in $(seq 1 $MAX_WAIT); do
     if [ -f "${SCHEDULER_FILE}" ]; then
         SCHEDULER_ADDRESS=$(cat "${SCHEDULER_FILE}")
         if [ ! -z "${SCHEDULER_ADDRESS}" ]; then
             break
         fi
-        break
     fi
 
     # Check if cluster manager is still running
