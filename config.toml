@@ -12,17 +12,17 @@
 # Compression Settings
 # blosc-lz4 is fast and gives good compression
 # Level 5 provides a balance: ~2-3x compression with minimal speed impact
-codec = "blosc-lz4"
-level = 5  # Increased from 1 for better compression (still fast)
+codec = "zstd"
+level = 3  # Increased from 1 for better compression (still fast)
 
 # Zarr Chunking
 # Larger chunks = better compression and fewer operations
 # 65536 frames @ ~2KB/frame = ~128 MB per chunk (optimal for large files)
-time_chunk = 65536
+time_chunk = 16384
 
 # CPU Parallelism
 # Maximize core utilization for your 8-core Xeon E5620
-num_workers = 24  # Slightly oversubscribed for better CPU saturation
+num_workers = 12  # Slightly oversubscribed for better CPU saturation
 blosc_threads = 16  # Match physical cores for compression
 
 # Async I/O Concurrency
@@ -35,17 +35,16 @@ max_concurrent_writes = 16  # Increased for better pipeline utilization
 chunk_size_mb = 150
 
 # Notes:
-# - This config uses ~1.5-2 GB RAM (10 workers × 150 MB + compression buffers)
+# - This config uses ~1.5-2 GB RAM (10 workers ×? 150 MB + compression buffers)
 # - Expected throughput: 100-300 MB/s on BeeGFS
 # - Expected compression: 2-3x (blosc-lz4 level 5)
 # - CPU utilization: 700-800% (all 8 cores saturated)
 
 [baseline_subtract]
 baseline_window = 100
-codec = "blosc-lz4"
-level = 5
+codec = "zstd"
+level = 3
 
 # Zarr Chunking (can be different from L0 if needed)
 # Uncomment and set a value to override input chunks, or leave commented to use input chunks
 # time_chunk = 65536
-
