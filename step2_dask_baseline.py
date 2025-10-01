@@ -249,12 +249,10 @@ async def main_async():
     client = None
     if args.dask_scheduler:
         client = await connect_to_dask(args.dask_scheduler)
-    original_mask = os.umask(0o000)
     try:
         await baseline_subtract_dask(args.input_zarr, args.output_zarr, config, client)
     finally:
         # Close client connection (but don't shutdown cluster)
-        os.umask(original_mask)
         if client:
             print("  Keeping cluster alive for next task...")
             await client.close()

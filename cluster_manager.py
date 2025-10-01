@@ -5,11 +5,13 @@ cluster_manager.py - Centralized Dask cluster lifecycle management
 
 This module provides utilities for creating, connecting to, and managing
 Dask distributed clusters that persist across multiple processing operations.
+
 """
 
 import os
 import asyncio
 import time
+from pathlib import Path
 from dask.distributed import Client, SSHCluster
 
 try:
@@ -77,9 +79,18 @@ async def create_dask_cluster(config: dict):
     print(f"  Threads per worker: {threads_per_worker}")
     print(f"  Memory per worker: {memory_per_worker}")
 
+    # Get absolute path to worker preload script
+    preload_script = str(Path(__file__).parent / "worker_preload.py")
+    if os.path.exists(preload_script):
+        print(f"  Using worker preload: {os.path.basename(preload_script)}")
+        preload = [preload_script]
+    else:
+        print(f"  Warning: worker_preload.py not found, workers may have permission issues")
+        preload = []
+
     # Repeat hosts for multiple workers per host
     all_hosts = ssh_hosts * workers_per_host
-    expected_workers = max(len(all_hosts) - 1, 0)
+    expected_workers = len(all_hosts)
 
     cluster = await SSHCluster(
         hosts=all_hosts,
@@ -87,10 +98,12 @@ async def create_dask_cluster(config: dict):
         worker_options={
             "nthreads": threads_per_worker,
             "memory_limit": memory_per_worker,
+            "preload": preload,  # Run worker_preload.py on each worker startup
         },
         scheduler_options={
             "port": 0,
             "dashboard_address": ":8797",
+            "preload": preload,  # Also set on scheduler
         },
         asynchronous=True
     )
