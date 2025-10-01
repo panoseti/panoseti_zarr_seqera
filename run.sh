@@ -316,3 +316,12 @@ for pff_file in "${INPUT_FILES[@]}"; do
 done
 echo ""
 
+# After all files are processed
+echo ""
+echo "Pipeline complete! Cleaning up cluster..."
+python3 -c "
+import asyncio
+import cluster_manager
+asyncio.run(cluster_manager.close_cluster())
+"
+

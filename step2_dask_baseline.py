@@ -20,6 +20,7 @@ from pathlib import Path
 import time
 from dask.distributed import Client, SSHCluster, LocalCluster, wait
 from dask.diagnostics import ProgressBar
+import cluster_manager
 
 # Try to import tomli/tomllib
 try:
@@ -58,31 +59,9 @@ def load_config(config_path: str = "config.toml"):
     return config
 
 async def setup_dask_cluster(config: dict):
-    """
-    Set up or connect to Dask cluster.
-
-    Returns client or None if Dask is disabled.
-    """
-    use_dask = config.get('use_dask', False)
-
-    if not use_dask:
-        print("Dask disabled - using local threading")
-        return None
-
-    scheduler_address = config.get('dask_scheduler_address', '')
-
-    if scheduler_address:
-        # Connect to existing scheduler
-        print(f"Connecting to existing Dask scheduler: {scheduler_address}")
-        client = await Client(scheduler_address, asynchronous=True)
-        print(f"  Connected! Workers: {len(client.scheduler_info()['workers'])}")
-        return client
-
-    # If no scheduler address, user should have cluster from step 1
-    print("Warning: use_dask=true but no dask_scheduler_address provided")
-    print("         Either provide scheduler address or run step 1 first")
-    print("         Falling back to local processing")
-    return None
+    """Set up or reuse Dask cluster"""
+    full_config = {**config.get('cluster', {}), **config}
+    return await cluster_manager.get_or_create_cluster(full_config)
 
 def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict, client=None):
     """
@@ -295,14 +274,13 @@ async def main_async():
 
     # Set up Dask cluster if enabled
     client = await setup_dask_cluster(config)
-
+    
     try:
-        # Run baseline subtraction
         baseline_subtract_dask(args.input_zarr, args.output_zarr, config, client)
     finally:
-        # Clean up Dask client (but don't close cluster - it might be from step 1)
+        # Don't close cluster, only disconnect client
         if client:
-            await client.close()
+            print("  Keeping cluster alive for next task...")
 
 def main():
     """Synchronous wrapper for async main"""

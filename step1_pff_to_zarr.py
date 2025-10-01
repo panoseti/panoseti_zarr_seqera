@@ -19,6 +19,7 @@ import numpy as np
 import tensorstore as ts
 from tqdm import tqdm
 import time
+import cluster_manager
 from pathlib import Path
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
@@ -223,68 +224,10 @@ def read_sequential_chunk_worker(args):
     return imgs, timestamps, headers, start_frame_hint
 
 async def setup_dask_cluster(config: dict):
-    """
-    Set up Dask cluster based on configuration.
-
-    Returns:
-    --------
-    client : dask.distributed.Client
-        Dask client connected to cluster
-    cluster : dask.distributed.Cluster or None
-        Cluster object if created, None if connecting to existing
-    """
-    use_dask = config.get('use_dask', False)
-
-    if not use_dask:
-        print("Dask disabled - using local multiprocessing")
-        return None, None
-
-    scheduler_address = config.get('dask_scheduler_address', '')
-
-    if scheduler_address:
-        # Connect to existing scheduler
-        print(f"Connecting to existing Dask scheduler: {scheduler_address}")
-        client = await Client(scheduler_address, asynchronous=True)
-        return client, None
-
-    # Create SSH cluster
-    ssh_hosts = config.get('ssh_hosts', ['localhost'])
-    workers_per_host = config.get('ssh_workers_per_host', 1)
-    threads_per_worker = config.get('ssh_threads_per_worker', 16)
-    memory_per_worker = config.get('ssh_memory_per_worker', '16GB')
-
-    print(f"\nCreating Dask SSH Cluster:")
-    print(f"  Hosts: {ssh_hosts}")
-    print(f"  Workers per host: {workers_per_host}")
-    print(f"  Threads per worker: {threads_per_worker}")
-    print(f"  Memory per worker: {memory_per_worker}")
-
-    # Preload command to set umask
-    preload_command = "import os; os.umask(0o000)"
-
-    cluster = await SSHCluster(
-        hosts=ssh_hosts * workers_per_host,  # Repeat hosts for multiple workers
-        connect_options={"known_hosts": None},
-        worker_options={
-            "nthreads": threads_per_worker,
-            "memory_limit": memory_per_worker,
-        },
-        scheduler_options={
-            "port": 0,
-            "dashboard_address": ":8797",
-        },
-        asynchronous=True
-    )
-
-    client = await Client(cluster, asynchronous=True)
-
-    print(f"\nDask cluster ready!")
-    print(f"  Dashboard: {client.dashboard_link}")
-    print(f"  Workers: {len(client.scheduler_info()['workers'])}")
-    print(f"  Total cores: {sum(w['nthreads'] for w in client.scheduler_info()['workers'].values())}")
-    print()
-
-    return client, cluster
+    """Set up Dask cluster using shared cluster manager"""
+    # Merge cluster config with task config
+    full_config = {**config.get('cluster', {}), **config}
+    return await cluster_manager.get_or_create_cluster(full_config)
 
 async def convert_pff_to_tensorstore_dask(
     pff_path: str,
@@ -613,25 +556,19 @@ async def main():
     zarr_root = sys.argv[2]
     config_path = sys.argv[3] if len(sys.argv) > 3 else "config.toml"
 
+    # Load both cluster and task configs
     config = load_config(config_path)
-
-    print("Configuration:")
-    for key, value in config.items():
-        if value is not None:
-            print(f"  {key}: {value}")
-    print()
-
-    # Set up Dask cluster if enabled
+    
+    # Set up cluster (will reuse if exists)
     client, cluster = await setup_dask_cluster(config)
-
+    
     try:
         await convert_pff_to_tensorstore_dask(pff_path, zarr_root, config, client)
     finally:
-        # Clean up Dask resources
+        # DON'T close cluster - let it persist for next file
+        # Only close client connection (lightweight)
         if client:
-            await client.close()
-        if cluster:
-            await cluster.close()
+            print("  Keeping cluster alive for next task...")
 
 if __name__ == "__main__":
     asyncio.run(main())
