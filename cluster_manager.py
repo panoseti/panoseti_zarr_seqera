@@ -79,7 +79,7 @@ async def create_dask_cluster(config: dict):
 
     # Repeat hosts for multiple workers per host
     all_hosts = ssh_hosts * workers_per_host
-    expected_workers = len(all_hosts)
+    expected_workers = max(len(all_hosts) - 1, 0)
 
     cluster = await SSHCluster(
         hosts=all_hosts,

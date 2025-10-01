@@ -17,6 +17,8 @@ CONFIG_FILE="${CONFIG_FILE:-config.toml}"
 # Cluster management
 CLUSTER_PID=""
 SCHEDULER_FILE=""
+SCHEDULER_ADDRESS=""
+USE_CLUSTER=false
 CLEANUP_DONE=0
 
 #==============================================================================
@@ -292,9 +294,17 @@ for pff_file in "${INPUT_FILES[@]}"; do
     echo ""
 
     if [ "$USE_CLUSTER" = true ]; then
-        python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}" "${CONFIG_FILE}" "${SCHEDULER_ADDRESS}"
+        if ! python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}" "${CONFIG_FILE}" "${SCHEDULER_ADDRESS}"; then
+            echo "ERROR: Step 1 failed for ${pff_file}"
+            PROCESSING_FAILED=1
+            break
+        fi
     else
-        python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}" "${CONFIG_FILE}"
+        if ! python3 step1_pff_to_zarr.py "${pff_file}" "${L0_ZARR}" "${CONFIG_FILE}"; then
+            echo "ERROR: Step 1 failed for ${pff_file}"
+            PROCESSING_FAILED=1
+            break
+        fi
     fi
 
     echo ""
@@ -305,14 +315,14 @@ for pff_file in "${INPUT_FILES[@]}"; do
     echo "  Output: ${L1_ZARR}"
     echo ""
 
-    if [ -z "${SCHEDULER_ARG}" ]; then
-        if ! python3 step2_dask_baseline.py "${L0_ZARR}" "${L1_ZARR}" --config "${CONFIG_FILE}"; then
+    if [ "$USE_CLUSTER" = true ]; then
+        if ! python3 step2_dask_baseline.py "${L0_ZARR}" "${L1_ZARR}" --config "${CONFIG_FILE}" --dask-scheduler "${SCHEDULER_ADDRESS}"; then
             echo "ERROR: Step 2 failed for ${basename}"
             PROCESSING_FAILED=1
             break
         fi
     else
-        if ! python3 step2_dask_baseline.py "${L0_ZARR}" "${L1_ZARR}" --config "${CONFIG_FILE}" --dask-scheduler "${SCHEDULER_ARG}"; then
+        if ! python3 step2_dask_baseline.py "${L0_ZARR}" "${L1_ZARR}" --config "${CONFIG_FILE}"; then
             echo "ERROR: Step 2 failed for ${basename}"
             PROCESSING_FAILED=1
             break
