@@ -499,11 +499,14 @@ async def main():
     client = None
     if scheduler_address:
         client = await connect_to_dask(scheduler_address)
-
+    
+    original_mask = os.umask(0o000)
     try:
+        
         await convert_pff_to_tensorstore_dask(pff_path, zarr_root, config, client)
     finally:
         # Close client connection (but don't shutdown cluster)
+        os.umask(original_mask)
         if client:
             print("  Keeping cluster alive for next task...")
             await client.close()
