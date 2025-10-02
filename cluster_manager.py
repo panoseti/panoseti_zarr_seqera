@@ -69,12 +69,33 @@ async def create_dask_cluster(config: dict):
 
     # Create SSH cluster
     ssh_hosts = config.get('ssh_hosts', ['localhost'])
-    workers_per_host = config.get('ssh_workers_per_host', 1)
+    if isinstance(ssh_hosts, str):
+        ssh_hosts = [ssh_hosts]
+
+    if not ssh_hosts:
+        raise ValueError("ssh_hosts must contain at least one entry")
+
+    workers_per_host = max(int(config.get('ssh_workers_per_host', 1)), 1)
     threads_per_worker = config.get('ssh_threads_per_worker', 16)
     memory_per_worker = config.get('ssh_memory_per_worker', '16GB')
 
+    scheduler_host = ssh_hosts[0]
+
+    configured_worker_hosts = ssh_hosts[1:] if len(ssh_hosts) > 1 else []
+    if not configured_worker_hosts:
+        # No explicit worker hosts provided; schedule workers on the scheduler host
+        configured_worker_hosts = [scheduler_host]
+
+    worker_hosts: list[str] = []
+    for host in configured_worker_hosts:
+        worker_hosts.extend([host] * workers_per_host)
+
+    hosts_for_cluster = [scheduler_host] + worker_hosts
+    expected_workers = len(worker_hosts)
+
     print(f"\nCreating Dask SSH Cluster:")
-    print(f"  Hosts: {ssh_hosts}")
+    print(f"  Scheduler host: {scheduler_host}")
+    print(f"  Worker hosts: {configured_worker_hosts}")
     print(f"  Workers per host: {workers_per_host}")
     print(f"  Threads per worker: {threads_per_worker}")
     print(f"  Memory per worker: {memory_per_worker}")
@@ -88,13 +109,10 @@ async def create_dask_cluster(config: dict):
         print(f"  Warning: worker_preload.py not found, workers may have permission issues")
         preload = []
 
-    # Repeat hosts for multiple workers per host
-    all_hosts = ssh_hosts * workers_per_host
-    expected_workers = max(len(all_hosts) - 1, 0)
     preload_command = "import os; os.umask(0o000)"
 
     cluster = await SSHCluster(
-        hosts=all_hosts,
+        hosts=hosts_for_cluster,
         connect_options={"known_hosts": None},
         worker_options={
             "nthreads": threads_per_worker,

@@ -224,6 +224,7 @@ async def convert_pff_to_tensorstore_dask(
     """
     Convert PFF to Zarr using Dask distributed computing or local multiprocessing.
     """
+    pff_path = str(Path(pff_path).expanduser().resolve())
     if not os.path.exists(pff_path):
         raise FileNotFoundError(pff_path)
     zarr_root = str(Path(zarr_root).resolve())
