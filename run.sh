@@ -202,73 +202,104 @@ echo ""
 # START PERSISTENT DASK CLUSTER
 #==============================================================================
 
-echo "================================================"
-echo "Starting Persistent Dask Cluster"
-echo "================================================"
-echo ""
+USE_DASK_CONFIG=$(python3 - "$CONFIG_FILE" <<'PY'
+import sys
+config_path = sys.argv[1]
+use_dask = False
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib  # type: ignore
+    except ImportError:
+        tomllib = None
+if tomllib is not None:
+    try:
+        with open(config_path, "rb") as f:
+            data = tomllib.load(f)
+        use_dask = bool(data.get("cluster", {}).get("use_dask", False))
+    except Exception:
+        pass
+print("true" if use_dask else "false")
+PY
+)
 
-# Create temporary scheduler file
-SCHEDULER_FILE=$(mktemp /tmp/dask_scheduler_XXXXXX.txt)
-
-echo "Starting cluster lifecycle manager..."
-echo "  Config: ${CONFIG_FILE}"
-echo "  Scheduler file: ${SCHEDULER_FILE}"
-echo ""
-
-# Start cluster manager with robust error handling
-python3 cluster_lifecycle_manager.py "${CONFIG_FILE}" "${SCHEDULER_FILE}" 2>&1 &
-CLUSTER_PID=$!
-
-echo "Cluster manager started (PID: $CLUSTER_PID)"
-
-# Wait for scheduler file to be created with timeout
-echo "Waiting for cluster to initialize..."
-MAX_WAIT=45
-for i in $(seq 1 $MAX_WAIT); do
-    if [ -f "${SCHEDULER_FILE}" ]; then
-        SCHEDULER_ADDRESS=$(cat "${SCHEDULER_FILE}")
-        if [ ! -z "${SCHEDULER_ADDRESS}" ]; then
-            break
-        fi
-    fi
-
-    # Check if cluster manager is still running
-    if ! kill -0 "$CLUSTER_PID" 2>/dev/null; then
-        echo "ERROR: Cluster manager process died during startup"
-        echo "Check logs above for error details"
-        exit 1
-    fi
-
-    sleep 1
-
-    if [ "$i" -eq "$MAX_WAIT" ]; then
-        echo "ERROR: Cluster failed to start within ${MAX_WAIT} seconds"
-        exit 1
-    fi
-done
-
-# Read scheduler address
-if [ ! -f "${SCHEDULER_FILE}" ]; then
-    echo "ERROR: Scheduler file not created"
-    exit 1
-fi
-
-SCHEDULER_ADDRESS=$(cat "${SCHEDULER_FILE}")
-
-if [ -z "${SCHEDULER_ADDRESS}" ]; then
-    echo "No Dask cluster - using local processing"
+if [ "${USE_DASK_CONFIG}" != "true" ]; then
+    echo "================================================"
+    echo "Skipping Persistent Dask Cluster"
+    echo "================================================"
+    echo "Dask disabled in ${CONFIG_FILE}; proceeding with local execution"
+    echo ""
     USE_CLUSTER=false
 else
-    echo "✓ Cluster ready!"
-    echo "  Scheduler address: ${SCHEDULER_ADDRESS}"
-    USE_CLUSTER=true
-fi
-echo ""
+    echo "================================================"
+    echo "Starting Persistent Dask Cluster"
+    echo "================================================"
+    echo ""
 
-# Verify cluster manager is still running
-if ! kill -0 "$CLUSTER_PID" 2>/dev/null; then
-    echo "ERROR: Cluster manager not running after startup"
-    exit 1
+    # Create temporary scheduler file
+    SCHEDULER_FILE=$(mktemp /tmp/dask_scheduler_XXXXXX.txt)
+
+    echo "Starting cluster lifecycle manager..."
+    echo "  Config: ${CONFIG_FILE}"
+    echo "  Scheduler file: ${SCHEDULER_FILE}"
+    echo ""
+
+    # Start cluster manager with robust error handling
+    python3 cluster_lifecycle_manager.py "${CONFIG_FILE}" "${SCHEDULER_FILE}" 2>&1 &
+    CLUSTER_PID=$!
+
+    echo "Cluster manager started (PID: $CLUSTER_PID)"
+
+    # Wait for scheduler file to be created with timeout
+    echo "Waiting for cluster to initialize..."
+    MAX_WAIT=45
+    for i in $(seq 1 $MAX_WAIT); do
+        if [ -f "${SCHEDULER_FILE}" ]; then
+            SCHEDULER_ADDRESS=$(cat "${SCHEDULER_FILE}")
+            if [ ! -z "${SCHEDULER_ADDRESS}" ]; then
+                break
+            fi
+        fi
+
+        # Check if cluster manager is still running
+        if ! kill -0 "$CLUSTER_PID" 2>/dev/null; then
+            echo "ERROR: Cluster manager process died during startup"
+            echo "Check logs above for error details"
+            exit 1
+        fi
+
+        sleep 1
+
+        if [ "$i" -eq "$MAX_WAIT" ]; then
+            echo "ERROR: Cluster failed to start within ${MAX_WAIT} seconds"
+            exit 1
+        fi
+    done
+
+    # Read scheduler address
+    if [ ! -f "${SCHEDULER_FILE}" ]; then
+        echo "ERROR: Scheduler file not created"
+        exit 1
+    fi
+
+    SCHEDULER_ADDRESS=$(cat "${SCHEDULER_FILE}")
+
+    if [ -z "${SCHEDULER_ADDRESS}" ]; then
+        echo "No Dask cluster - using local processing"
+        USE_CLUSTER=false
+    else
+        echo "✓ Cluster ready!"
+        echo "  Scheduler address: ${SCHEDULER_ADDRESS}"
+        USE_CLUSTER=true
+    fi
+    echo ""
+
+    # Verify cluster manager is still running
+    if ! kill -0 "$CLUSTER_PID" 2>/dev/null; then
+        echo "ERROR: Cluster manager not running after startup"
+        exit 1
+    fi
 fi
 
 #==============================================================================
