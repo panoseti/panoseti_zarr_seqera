@@ -4,7 +4,7 @@
 [cluster]
 # Cluster type determines which backend to use
 # Supported types: "ssh", "local"
-type = "ssh"
+type = "local"
 
 # Cluster state management
 use_cluster = false  # Set to true to enable distributed computing
@@ -14,7 +14,7 @@ use_cluster = false  # Set to true to enable distributed computing
 hosts = ["localhost", "panoseti-dfs0", "panoseti-dfs1", "panoseti-dfs2"]
 workers_per_host = 1
 threads_per_worker = 16
-memory_per_worker = "16GB"
+memory_per_worker = "32GB"
 scheduler_port = 0  # 0 = auto-assign
 dashboard_port = 8797
 connect_timeout = 60  # seconds to wait for workers
@@ -52,16 +52,16 @@ dashboard_port = 8787
 
 [pff_to_zarr]
 # Compression Settings
-codec = "blosc-lz4"
+codec = "zstd"
 level = 5
-time_chunk = 8192
-num_workers = 10
-blosc_threads = 8
+time_chunk = 32768
+num_workers = 5
+blosc_threads = 10
 max_concurrent_writes = 16
-chunk_size_mb = 150
+chunk_size_mb = 200
 
 [baseline_subtract]
 baseline_window = 100
-codec = "blosc-lz4"
+codec = "zstd"
 level = 5
-compute_chunk_size = 8192
+compute_chunk_size = 16384
