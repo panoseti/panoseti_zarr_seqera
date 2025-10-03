@@ -350,7 +350,7 @@ async def convert_pff_stream_to_zarr(
     # Configuration
     codec = config.get('codec', 'blosc-lz4')
     level = config.get('level', 5)
-    time_chunk = config.get('time_chunk', 65536)
+    time_chunk = config.get('time_chunk', 8192)
     max_concurrent_writes = config.get('max_concurrent_writes', 12)
 
     print(f"\nZarr configuration:")
