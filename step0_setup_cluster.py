@@ -21,7 +21,7 @@ import signal
 from pathlib import Path
 
 # Import cluster management utilities
-from cluster_manager import load_cluster_config, create_dask_cluster, shutdown_cluster
+from cluster_manager import load_cluster_config, create_cluster, shutdown_cluster
 
 
 class DaskClusterSetup:
@@ -54,7 +54,7 @@ class DaskClusterSetup:
             
             # Create the cluster
             print("\nInitializing Dask cluster...")
-            self.client, self.cluster = await create_dask_cluster(config)
+            self.client, self.cluster = await create_cluster(config)
             
             if not self.client:
                 # Dask disabled - write empty file

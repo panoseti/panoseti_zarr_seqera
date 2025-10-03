@@ -12,8 +12,6 @@ import sys
 import argparse
 import numpy as np
 import xarray as xr
-import dask
-import dask.array as da
 from pathlib import Path
 import time
 from dask.distributed import Client, wait

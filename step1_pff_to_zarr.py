@@ -22,8 +22,6 @@ from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import cpu_count
 import pff
-import dask
-import dask.array as da
 from dask.distributed import Client
 
 # Try to import tomli/tomllib for TOML support
