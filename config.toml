@@ -7,7 +7,7 @@
 type = "local"
 
 # Cluster state management
-use_dask = false  # Set to true to enable distributed computing
+use_cluster = false  # Set to true to enable distributed computing
 
 [cluster.ssh]
 # SSH Cluster Configuration (dask.distributed.SSHCluster)

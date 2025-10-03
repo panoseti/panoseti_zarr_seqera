@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# run.sh - Three-step PANOSETI L0 -> L1 pipeline with separated cluster setup
+# run.sh - PANOSETI L0 -> L1 pipeline with stream-based architecture
+# Updated to process entire observation directories with PFF grouping
 
 set -e
 set -u
@@ -76,23 +77,29 @@ trap cleanup EXIT INT TERM ERR
 
 usage() {
     cat << EOF
-Usage: $0 <input_pff_file1> [input_pff_file2 ...] <output_l1_dir>
+Usage: $0 <observation_directory> <output_l0_dir> <output_l1_dir>
 
-Three-step pipeline:
+Stream-based pipeline:
   Step 0: Setup Dask cluster (optional, based on config)
-  Step 1: Convert PFF to Zarr (L0)
-  Step 2: Apply baseline subtraction (L0 -> L1)
+  Step 1: Convert all PFF files to Zarr (grouped by dp/module -> L0)
+  Step 2: Apply baseline subtraction to all L0 Zarr files (L0 -> L1)
 
 Arguments:
-  input_pff_file    One or more PFF files to process
-  output_l1_dir     Directory for L1 output
+  observation_directory   Directory containing PFF files (*.pff)
+  output_l0_dir          Directory for L0 Zarr output
+  output_l1_dir          Directory for L1 Zarr output
 
 Configuration:
-  CONFIG_FILE       Path to TOML config (default: config.toml)
+  CONFIG_FILE            Path to TOML config (default: config.toml)
 
 Examples:
-  $0 file1.pff file2.pff /scratch/output/L1
-  CONFIG_FILE=custom.toml $0 data/*.pff /scratch/output/L1
+  # Process observation directory
+  $0 /mnt/beegfs/data/L0/obs_Lick.start_2024-07-25T04:34:06Z.runtype_sci-data.pffd \
+     /mnt/beegfs/zarr/L0 \
+     /mnt/beegfs/zarr/L1
+
+  # Custom config
+  CONFIG_FILE=custom.toml $0 /path/to/obs.pffd /path/to/L0 /path/to/L1
 
 EOF
     exit 1
@@ -127,83 +134,72 @@ check_required_files() {
     fi
 }
 
-verify_pff_files() {
-    echo "Verifying PFF file structure..."
+discover_pff_streams() {
+    local obs_dir="$1"
 
-    python3 - "${INPUT_FILES[@]}" <<'PYEOF'
+    echo "Discovering PFF data streams..."
+    python3 - "$obs_dir" <<'PYEOF'
 import sys
+import os
+from pathlib import Path
+from collections import defaultdict
 import pff
 
-# Get all input files from command line
-input_files = sys.argv[1:]
+obs_dir = sys.argv[1]
+obs_path = Path(obs_dir)
 
-print(f"  Checking {len(input_files)} file(s) with pff.img_info()...")
+if not obs_path.exists():
+    print(f"ERROR: Observation directory not found: {obs_dir}")
+    sys.exit(1)
+
+# Group files by (dp, module)
+streams = defaultdict(list)
+pff_files = list(obs_path.glob("*.pff"))
+
+if not pff_files:
+    print(f"ERROR: No PFF files found in {obs_dir}")
+    sys.exit(1)
+
+print(f"Found {len(pff_files)} PFF files")
 print()
 
-all_valid = True
-
-for pff_path in input_files:
-    basename = pff_path.split('/')[-1]
-
+for pff_file in pff_files:
     try:
-        # Parse filename to get data product info
-        parsed = pff.parse_name(basename)
-
-        if not parsed or 'dp' not in parsed:
-            print(f"  [SKIP] {basename}")
-            print(f"         Cannot determine data product type")
+        parts = pff.parse_name(pff_file.name)
+        if not parts or 'dp' not in parts or 'module' not in parts:
             continue
 
-        dp = parsed['dp']
-        bpp = int(parsed.get('bpp', 2))
+        dp = parts['dp']
+        module = parts['module']
+        seqno = int(parts.get('seqno', 0))
 
-        # Determine bytes per image based on data product
-        if dp == 'img16':
-            bytes_per_image = 32 * 32 * bpp
-        elif dp == 'img8':
-            bytes_per_image = 16 * 16 * bpp
-        elif dp == 'ph1024':
-            bytes_per_image = 32 * 32 * bpp
-        elif dp == 'ph256':
-            bytes_per_image = 16 * 16 * bpp
-        else:
-            print(f"  [SKIP] {basename}")
-            print(f"         Unknown data product: {dp}")
-            continue
-
-        # Open file and get info
-        with open(pff_path, 'rb') as f:
-            frame_size, nframes, first_t, last_t = pff.img_info(f, bytes_per_image)
-
-        # Calculate duration and file size
-        duration = last_t - first_t
-        file_size_mb = frame_size * nframes / (1024 * 1024)
-
-        print(f"  [OK] {basename}")
-        print(f"       Data product: {dp} ({bpp} bytes/pixel)")
-        print(f"       Frames: {nframes:,}")
-        print(f"       Frame size: {frame_size} bytes")
-        print(f"       File size: {file_size_mb:.1f} MB")
-        print(f"       Duration: {duration:.1f}s ({duration/60:.1f} min)")
-        print(f"       Time range: {first_t:.3f} - {last_t:.3f}")
-        print()
-
+        stream_key = (dp, module)
+        streams[stream_key].append((str(pff_file), seqno))
     except Exception as e:
-        print(f"  [ERROR] {basename}")
-        print(f"          {str(e)}")
-        print()
-        all_valid = False
+        print(f"Warning: Could not parse {pff_file.name}: {e}")
+        continue
 
-if not all_valid:
-    print("ERROR: Some files failed validation")
-    sys.exit(1)
-else:
-    print("✓ All files validated successfully")
+# Sort each stream by seqno
+for key in streams:
+    streams[key].sort(key=lambda x: x[1])
 
+print(f"Discovered {len(streams)} data streams:")
+print()
+
+for (dp, module), files in sorted(streams.items()):
+    print(f"Stream: dp={dp}, module={module}")
+    print(f"  Files: {len(files)}")
+    for fpath, seqno in files[:3]:  # Show first 3
+        print(f"    - {os.path.basename(fpath)} (seqno={seqno})")
+    if len(files) > 3:
+        print(f"    ... and {len(files) - 3} more")
+    print()
+
+print(f"Total streams: {len(streams)}")
 PYEOF
 
     if [ $? -ne 0 ]; then
-        echo "ERROR: PFF file verification failed"
+        echo "ERROR: Failed to discover PFF streams"
         exit 1
     fi
 }
@@ -212,18 +208,21 @@ PYEOF
 # ARGUMENT PARSING
 #==============================================================================
 
-if [ $# -lt 2 ]; then
+if [ $# -lt 3 ]; then
     echo "Error: Insufficient arguments"
     echo ""
     usage
 fi
 
-OUTPUT_L1_DIR="${!#}"
-INPUT_FILES=()
+OBS_DIR="$1"
+OUTPUT_L0_DIR="$2"
+OUTPUT_L1_DIR="$3"
 
-for ((i=1; i<$#; i++)); do
-    INPUT_FILES+=("${!i}")
-done
+# Validate observation directory
+if [ ! -d "$OBS_DIR" ]; then
+    echo "ERROR: Observation directory not found: $OBS_DIR"
+    exit 1
+fi
 
 #==============================================================================
 # STARTUP
@@ -231,39 +230,25 @@ done
 
 echo "================================================"
 echo "PANOSETI L0 -> L1 Processing Pipeline"
-echo "THREE-STEP ARCHITECTURE"
+echo "STREAM-BASED ARCHITECTURE"
 echo "================================================"
 echo ""
 echo "Configuration:"
-echo "  Input files: ${#INPUT_FILES[@]}"
-for file in "${INPUT_FILES[@]}"; do
-    echo "    - $file"
-done
-echo "  Output L1 dir: $OUTPUT_L1_DIR"
+echo "  Observation dir: $OBS_DIR"
+echo "  L0 output dir: $OUTPUT_L0_DIR"
+echo "  L1 output dir: $OUTPUT_L1_DIR"
 echo "  Config file: $CONFIG_FILE"
 echo ""
 
-# Create directories
-L0_TEMP_DIR="${OUTPUT_L1_DIR}/../L0_temp"
+# Create output directories
+mkdir -p "$OUTPUT_L0_DIR" || { echo "ERROR: Cannot create $OUTPUT_L0_DIR"; exit 1; }
 mkdir -p "$OUTPUT_L1_DIR" || { echo "ERROR: Cannot create $OUTPUT_L1_DIR"; exit 1; }
-mkdir -p "$L0_TEMP_DIR" || { echo "ERROR: Cannot create $L0_TEMP_DIR"; exit 1; }
-
-# Validate inputs exist
-echo "Checking input file existence..."
-for pff_file in "${INPUT_FILES[@]}"; do
-    if [ ! -f "$pff_file" ]; then
-        echo "ERROR: Input file not found: $pff_file"
-        exit 1
-    fi
-    echo "  [OK] $pff_file"
-done
-echo ""
 
 check_required_files
 echo ""
 
-# Verify PFF file structure with pff.img_info()
-verify_pff_files
+# Discover PFF streams
+discover_pff_streams "$OBS_DIR"
 echo ""
 
 #==============================================================================
@@ -288,9 +273,9 @@ if tomllib:
     try:
         with open(config_path, "rb") as f:
             data = tomllib.load(f)
-        # Check both old and new key names
-        use_dask = bool(data.get("cluster", {}).get("use_dask", False) or
-                       data.get("cluster", {}).get("use_cluster", False))
+            # Check both old and new key names
+            use_dask = bool(data.get("cluster", {}).get("use_dask", False) or
+                          data.get("cluster", {}).get("use_cluster", False))
     except:
         pass
 
@@ -348,120 +333,164 @@ else
         USE_CLUSTER=false
     else
         echo "  ✓ Cluster ready!"
-        echo "    Scheduler: $SCHEDULER_ADDRESS"
+        echo "  Scheduler: $SCHEDULER_ADDRESS"
         USE_CLUSTER=true
     fi
     echo ""
 fi
 
 #==============================================================================
-# STEP 1 & 2: PROCESS FILES
+# STEP 1: CONVERT ALL PFF FILES TO ZARR (GROUPED BY STREAM)
 #==============================================================================
 
-file_count=1
-total_files=${#INPUT_FILES[@]}
-PROCESSING_FAILED=0
+echo "================================================"
+echo "Step 1: PFF to Zarr Conversion (All Streams)"
+echo "================================================"
+echo ""
+echo "This step will convert all PFF files to Zarr format."
+echo "Files with the same data product and module will be"
+echo "combined into a single Zarr file."
+echo ""
 
-for pff_file in "${INPUT_FILES[@]}"; do
-    basename=$(basename "$pff_file" .pff)
+STEP1_START=$(date +%s)
 
-    echo "================================================"
-    echo "Processing file ${file_count}/${total_files}: $basename"
-    echo "================================================"
-    echo ""
-
-    L0_ZARR="${L0_TEMP_DIR}/${basename}_L0.zarr"
-    L1_ZARR="${OUTPUT_L1_DIR}/${basename}_L1.zarr"
-
-    # STEP 1: PFF to Zarr
-    echo "------------------------------------------------"
-    echo "Step 1: PFF to Zarr Conversion"
-    echo "------------------------------------------------"
-    echo "  Input:  $pff_file"
-    echo "  Output: $L0_ZARR"
-    echo ""
-
-    if [ "$USE_CLUSTER" = true ]; then
-        if ! python3 step1_pff_to_zarr.py "$pff_file" "$L0_ZARR" "$CONFIG_FILE" "$SCHEDULER_ADDRESS"; then
-            echo "ERROR: Step 1 failed"
-            PROCESSING_FAILED=1
-            break
-        fi
-    else
-        if ! python3 step1_pff_to_zarr.py "$pff_file" "$L0_ZARR" "$CONFIG_FILE"; then
-            echo "ERROR: Step 1 failed"
-            PROCESSING_FAILED=1
-            break
-        fi
+if [ "$USE_CLUSTER" = true ]; then
+    echo "Running with Dask cluster..."
+    if ! python3 step1_pff_to_zarr.py "$OBS_DIR" "$OUTPUT_L0_DIR" "$CONFIG_FILE" "$SCHEDULER_ADDRESS"; then
+        echo "ERROR: Step 1 (PFF to Zarr) failed"
+        exit 1
     fi
+else
+    echo "Running with local processing..."
+    if ! python3 step1_pff_to_zarr.py "$OBS_DIR" "$OUTPUT_L0_DIR" "$CONFIG_FILE"; then
+        echo "ERROR: Step 1 (PFF to Zarr) failed"
+        exit 1
+    fi
+fi
 
-    echo ""
+STEP1_END=$(date +%s)
+STEP1_DURATION=$((STEP1_END - STEP1_START))
 
-    # STEP 2: Baseline Subtraction
+echo ""
+echo "✓ Step 1 complete (${STEP1_DURATION}s)"
+echo ""
+
+#==============================================================================
+# STEP 2: BASELINE SUBTRACTION FOR ALL L0 ZARR FILES
+#==============================================================================
+
+echo "================================================"
+echo "Step 2: Baseline Subtraction (All L0 -> L1)"
+echo "================================================"
+echo ""
+
+# Discover all L0 Zarr files
+L0_ZARR_FILES=($(find "$OUTPUT_L0_DIR" -maxdepth 1 -type d -name "*.zarr" | sort))
+
+if [ ${#L0_ZARR_FILES[@]} -eq 0 ]; then
+    echo "ERROR: No L0 Zarr files found in $OUTPUT_L0_DIR"
+    exit 1
+fi
+
+echo "Found ${#L0_ZARR_FILES[@]} L0 Zarr file(s) to process:"
+for zarr_file in "${L0_ZARR_FILES[@]}"; do
+    echo "  - $(basename "$zarr_file")"
+done
+echo ""
+
+STEP2_START=$(date +%s)
+STEP2_FAILED=0
+file_count=1
+total_files=${#L0_ZARR_FILES[@]}
+
+for L0_ZARR in "${L0_ZARR_FILES[@]}"; do
+    basename_zarr=$(basename "$L0_ZARR" .zarr)
+    L1_ZARR="${OUTPUT_L1_DIR}/${basename_zarr}_L1.zarr"
+
     echo "------------------------------------------------"
-    echo "Step 2: Baseline Subtraction"
+    echo "Processing ${file_count}/${total_files}: $basename_zarr"
     echo "------------------------------------------------"
-    echo "  Input:  $L0_ZARR"
-    echo "  Output: $L1_ZARR"
+    echo "  Input (L0):  $L0_ZARR"
+    echo "  Output (L1): $L1_ZARR"
     echo ""
 
     if [ "$USE_CLUSTER" = true ]; then
         if ! python3 step2_dask_baseline.py "$L0_ZARR" "$L1_ZARR" --config "$CONFIG_FILE" --dask-scheduler "$SCHEDULER_ADDRESS"; then
-            echo "ERROR: Step 2 failed"
-            PROCESSING_FAILED=1
+            echo "ERROR: Step 2 failed for $basename_zarr"
+            STEP2_FAILED=1
             break
         fi
     else
         if ! python3 step2_dask_baseline.py "$L0_ZARR" "$L1_ZARR" --config "$CONFIG_FILE"; then
-            echo "ERROR: Step 2 failed"
-            PROCESSING_FAILED=1
+            echo "ERROR: Step 2 failed for $basename_zarr"
+            STEP2_FAILED=1
             break
         fi
     fi
 
     echo ""
-
-    # Cleanup L0 temp
-    echo "Cleaning up temporary L0 file..."
-    rm -rf "$L0_ZARR"
-
-    echo "[DONE] Completed $basename"
+    echo "✓ Completed $basename_zarr"
     echo ""
 
     file_count=$((file_count + 1))
 done
 
-# Cleanup empty temp directory
-if [ -d "$L0_TEMP_DIR" ] && [ -z "$(ls -A $L0_TEMP_DIR)" ]; then
-    rmdir "$L0_TEMP_DIR"
+STEP2_END=$(date +%s)
+STEP2_DURATION=$((STEP2_END - STEP2_START))
+
+if [ "$STEP2_FAILED" -eq 1 ]; then
+    echo "================================================"
+    echo "Pipeline Failed at Step 2"
+    echo "================================================"
+    exit 1
 fi
+
+echo "✓ Step 2 complete (${STEP2_DURATION}s)"
+echo ""
 
 #==============================================================================
 # SUMMARY
 #==============================================================================
 
-if [ "$PROCESSING_FAILED" -eq 1 ]; then
-    echo "================================================"
-    echo "Pipeline Failed"
-    echo "================================================"
-    exit 1
-fi
+TOTAL_END=$(date +%s)
+TOTAL_DURATION=$((TOTAL_END - STEP1_START))
 
 echo "================================================"
 echo "Pipeline Complete!"
 echo "================================================"
 echo ""
-echo "Processed ${total_files} file(s)"
-echo "L1 products: $OUTPUT_L1_DIR"
+echo "Timing Summary:"
+echo "  Step 1 (PFF->Zarr):      ${STEP1_DURATION}s"
+echo "  Step 2 (Baseline):       ${STEP2_DURATION}s"
+echo "  Total time:              ${TOTAL_DURATION}s"
 echo ""
-echo "Output files:"
-for pff_file in "${INPUT_FILES[@]}"; do
-    basename=$(basename "$pff_file" .pff)
-    L1_ZARR="${OUTPUT_L1_DIR}/${basename}_L1.zarr"
-    if [ -d "$L1_ZARR" ]; then
-        echo "  ✓ ${basename}_L1.zarr"
-    else
-        echo "  ✗ ${basename}_L1.zarr (MISSING)"
+echo "Output directories:"
+echo "  L0 Zarr files: $OUTPUT_L0_DIR"
+echo "  L1 Zarr files: $OUTPUT_L1_DIR"
+echo ""
+
+echo "L0 files created:"
+for zarr_file in "${L0_ZARR_FILES[@]}"; do
+    if [ -d "$zarr_file" ]; then
+        size=$(du -sh "$zarr_file" | cut -f1)
+        echo "  ✓ $(basename "$zarr_file") [$size]"
     fi
 done
 echo ""
+
+echo "L1 files created:"
+for L0_ZARR in "${L0_ZARR_FILES[@]}"; do
+    basename_zarr=$(basename "$L0_ZARR" .zarr)
+    L1_ZARR="${OUTPUT_L1_DIR}/${basename_zarr}_L1.zarr"
+    if [ -d "$L1_ZARR" ]; then
+        size=$(du -sh "$L1_ZARR" | cut -f1)
+        echo "  ✓ $(basename "$L1_ZARR") [$size]"
+    else
+        echo "  ✗ $(basename "$L1_ZARR") (MISSING)"
+    fi
+done
+echo ""
+
+echo "================================================"
+echo "Pipeline execution complete!"
+echo "================================================"
