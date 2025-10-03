@@ -1,4 +1,5 @@
 #!/bin/bash
+
 # run.sh - Three-step PANOSETI L0 -> L1 pipeline with separated cluster setup
 
 set -e
@@ -25,14 +26,13 @@ cleanup() {
         return
     fi
     CLEANUP_DONE=1
-    
     local exit_code=$?
-    
+
     echo ""
     echo "================================================"
     echo "Pipeline Cleanup"
     echo "================================================"
-    
+
     # Stop cluster if we started it
     if [ ! -z "${CLUSTER_PID:-}" ] && [ "$CLUSTER_PID" != "0" ]; then
         echo "Stopping cluster (PID: $CLUSTER_PID)..."
@@ -53,15 +53,15 @@ cleanup() {
             fi
         fi
     fi
-    
+
     # Cleanup scheduler file
     if [ ! -z "${SCHEDULER_FILE:-}" ] && [ -f "${SCHEDULER_FILE}" ]; then
         rm -f "${SCHEDULER_FILE}"
     fi
-    
+
     echo "✓ Cleanup complete"
     echo "================================================"
-    
+
     if [ "$exit_code" -ne 0 ]; then
         echo "Pipeline exited with error code: $exit_code"
         exit $exit_code
@@ -76,7 +76,7 @@ trap cleanup EXIT INT TERM ERR
 
 usage() {
     cat << EOF
-Usage: $0 [input_pff_file2 ...] <output_l1_dir>
+Usage: $0 <input_pff_file1> [input_pff_file2 ...] <output_l1_dir>
 
 Three-step pipeline:
   Step 0: Setup Dask cluster (optional, based on config)
@@ -84,15 +84,16 @@ Three-step pipeline:
   Step 2: Apply baseline subtraction (L0 -> L1)
 
 Arguments:
-  input_pff_file  One or more PFF files to process
-  output_l1_dir   Directory for L1 output
+  input_pff_file    One or more PFF files to process
+  output_l1_dir     Directory for L1 output
 
 Configuration:
-  CONFIG_FILE     Path to TOML config (default: config.toml)
+  CONFIG_FILE       Path to TOML config (default: config.toml)
 
 Examples:
   $0 file1.pff file2.pff /scratch/output/L1
   CONFIG_FILE=custom.toml $0 data/*.pff /scratch/output/L1
+
 EOF
     exit 1
 }
@@ -110,7 +111,7 @@ check_required_files() {
         "cluster_manager.py"
         "pff.py"
     )
-    
+
     for script in "${required[@]}"; do
         if [ ! -f "$script" ]; then
             echo "ERROR: $script not found!"
@@ -118,11 +119,92 @@ check_required_files() {
         fi
         echo "  [OK] $script"
     done
-    
+
     if [ ! -f "$CONFIG_FILE" ]; then
         echo "Warning: $CONFIG_FILE not found - using defaults"
     else
         echo "  [OK] $CONFIG_FILE"
+    fi
+}
+
+verify_pff_files() {
+    echo "Verifying PFF file structure..."
+
+    python3 - "${INPUT_FILES[@]}" <<'PYEOF'
+import sys
+import pff
+
+# Get all input files from command line
+input_files = sys.argv[1:]
+
+print(f"  Checking {len(input_files)} file(s) with pff.img_info()...")
+print()
+
+all_valid = True
+
+for pff_path in input_files:
+    basename = pff_path.split('/')[-1]
+
+    try:
+        # Parse filename to get data product info
+        parsed = pff.parse_name(basename)
+
+        if not parsed or 'dp' not in parsed:
+            print(f"  [SKIP] {basename}")
+            print(f"         Cannot determine data product type")
+            continue
+
+        dp = parsed['dp']
+        bpp = int(parsed.get('bpp', 2))
+
+        # Determine bytes per image based on data product
+        if dp == 'img16':
+            bytes_per_image = 32 * 32 * bpp
+        elif dp == 'img8':
+            bytes_per_image = 16 * 16 * bpp
+        elif dp == 'ph1024':
+            bytes_per_image = 32 * 32 * bpp
+        elif dp == 'ph256':
+            bytes_per_image = 16 * 16 * bpp
+        else:
+            print(f"  [SKIP] {basename}")
+            print(f"         Unknown data product: {dp}")
+            continue
+
+        # Open file and get info
+        with open(pff_path, 'rb') as f:
+            frame_size, nframes, first_t, last_t = pff.img_info(f, bytes_per_image)
+
+        # Calculate duration and file size
+        duration = last_t - first_t
+        file_size_mb = frame_size * nframes / (1024 * 1024)
+
+        print(f"  [OK] {basename}")
+        print(f"       Data product: {dp} ({bpp} bytes/pixel)")
+        print(f"       Frames: {nframes:,}")
+        print(f"       Frame size: {frame_size} bytes")
+        print(f"       File size: {file_size_mb:.1f} MB")
+        print(f"       Duration: {duration:.1f}s ({duration/60:.1f} min)")
+        print(f"       Time range: {first_t:.3f} - {last_t:.3f}")
+        print()
+
+    except Exception as e:
+        print(f"  [ERROR] {basename}")
+        print(f"          {str(e)}")
+        print()
+        all_valid = False
+
+if not all_valid:
+    print("ERROR: Some files failed validation")
+    sys.exit(1)
+else:
+    print("✓ All files validated successfully")
+
+PYEOF
+
+    if [ $? -ne 0 ]; then
+        echo "ERROR: PFF file verification failed"
+        exit 1
     fi
 }
 
@@ -138,6 +220,7 @@ fi
 
 OUTPUT_L1_DIR="${!#}"
 INPUT_FILES=()
+
 for ((i=1; i<$#; i++)); do
     INPUT_FILES+=("${!i}")
 done
@@ -165,8 +248,8 @@ L0_TEMP_DIR="${OUTPUT_L1_DIR}/../L0_temp"
 mkdir -p "$OUTPUT_L1_DIR" || { echo "ERROR: Cannot create $OUTPUT_L1_DIR"; exit 1; }
 mkdir -p "$L0_TEMP_DIR" || { echo "ERROR: Cannot create $L0_TEMP_DIR"; exit 1; }
 
-# Validate inputs
-echo "Verifying input files..."
+# Validate inputs exist
+echo "Checking input file existence..."
 for pff_file in "${INPUT_FILES[@]}"; do
     if [ ! -f "$pff_file" ]; then
         echo "ERROR: Input file not found: $pff_file"
@@ -179,6 +262,10 @@ echo ""
 check_required_files
 echo ""
 
+# Verify PFF file structure with pff.img_info()
+verify_pff_files
+echo ""
+
 #==============================================================================
 # STEP 0: SETUP DASK CLUSTER
 #==============================================================================
@@ -188,6 +275,7 @@ USE_DASK_CONFIG=$(python3 - "$CONFIG_FILE" <<'PY'
 import sys
 config_path = sys.argv[1]
 use_dask = False
+
 try:
     import tomllib
 except ImportError:
@@ -195,13 +283,17 @@ except ImportError:
         import tomli as tomllib
     except ImportError:
         tomllib = None
+
 if tomllib:
     try:
         with open(config_path, "rb") as f:
             data = tomllib.load(f)
-        use_dask = bool(data.get("cluster", {}).get("use_dask", False))
+        # Check both old and new key names
+        use_dask = bool(data.get("cluster", {}).get("use_dask", False) or
+                       data.get("cluster", {}).get("use_cluster", False))
     except:
         pass
+
 print("true" if use_dask else "false")
 PY
 )
@@ -219,16 +311,14 @@ else
     echo "Step 0: Dask Cluster Setup"
     echo "================================================"
     echo ""
-    
+
     SCHEDULER_FILE=$(mktemp /tmp/dask_scheduler_XXXXXX.txt)
-    
     echo "Starting cluster..."
     python3 step0_setup_cluster.py "$CONFIG_FILE" "$SCHEDULER_FILE" 2>&1 &
     CLUSTER_PID=$!
-    
     echo "  Cluster PID: $CLUSTER_PID"
     echo "  Waiting for initialization..."
-    
+
     # Wait for scheduler file with timeout
     MAX_WAIT=60
     for i in $(seq 1 $MAX_WAIT); do
@@ -238,27 +328,27 @@ else
                 break
             fi
         fi
-        
+
         # Check if cluster manager died
         if ! kill -0 "$CLUSTER_PID" 2>/dev/null; then
             echo "ERROR: Cluster manager died during startup"
             exit 1
         fi
-        
+
         sleep 1
-        
+
         if [ "$i" -eq "$MAX_WAIT" ]; then
             echo "ERROR: Cluster failed to start within ${MAX_WAIT}s"
             exit 1
         fi
     done
-    
+
     if [ -z "$SCHEDULER_ADDRESS" ]; then
         echo "WARNING: No scheduler address - using local processing"
         USE_CLUSTER=false
     else
         echo "  ✓ Cluster ready!"
-        echo "  Scheduler: $SCHEDULER_ADDRESS"
+        echo "    Scheduler: $SCHEDULER_ADDRESS"
         USE_CLUSTER=true
     fi
     echo ""
@@ -274,15 +364,15 @@ PROCESSING_FAILED=0
 
 for pff_file in "${INPUT_FILES[@]}"; do
     basename=$(basename "$pff_file" .pff)
-    
+
     echo "================================================"
     echo "Processing file ${file_count}/${total_files}: $basename"
     echo "================================================"
     echo ""
-    
+
     L0_ZARR="${L0_TEMP_DIR}/${basename}_L0.zarr"
     L1_ZARR="${OUTPUT_L1_DIR}/${basename}_L1.zarr"
-    
+
     # STEP 1: PFF to Zarr
     echo "------------------------------------------------"
     echo "Step 1: PFF to Zarr Conversion"
@@ -290,7 +380,7 @@ for pff_file in "${INPUT_FILES[@]}"; do
     echo "  Input:  $pff_file"
     echo "  Output: $L0_ZARR"
     echo ""
-    
+
     if [ "$USE_CLUSTER" = true ]; then
         if ! python3 step1_pff_to_zarr.py "$pff_file" "$L0_ZARR" "$CONFIG_FILE" "$SCHEDULER_ADDRESS"; then
             echo "ERROR: Step 1 failed"
@@ -304,8 +394,9 @@ for pff_file in "${INPUT_FILES[@]}"; do
             break
         fi
     fi
+
     echo ""
-    
+
     # STEP 2: Baseline Subtraction
     echo "------------------------------------------------"
     echo "Step 2: Baseline Subtraction"
@@ -313,7 +404,7 @@ for pff_file in "${INPUT_FILES[@]}"; do
     echo "  Input:  $L0_ZARR"
     echo "  Output: $L1_ZARR"
     echo ""
-    
+
     if [ "$USE_CLUSTER" = true ]; then
         if ! python3 step2_dask_baseline.py "$L0_ZARR" "$L1_ZARR" --config "$CONFIG_FILE" --dask-scheduler "$SCHEDULER_ADDRESS"; then
             echo "ERROR: Step 2 failed"
@@ -327,15 +418,16 @@ for pff_file in "${INPUT_FILES[@]}"; do
             break
         fi
     fi
+
     echo ""
-    
+
     # Cleanup L0 temp
     echo "Cleaning up temporary L0 file..."
     rm -rf "$L0_ZARR"
-    
+
     echo "[DONE] Completed $basename"
     echo ""
-    
+
     file_count=$((file_count + 1))
 done
 
@@ -373,4 +465,3 @@ for pff_file in "${INPUT_FILES[@]}"; do
     fi
 done
 echo ""
-
