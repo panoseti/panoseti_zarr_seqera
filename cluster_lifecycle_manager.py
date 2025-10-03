@@ -41,6 +41,18 @@ class ClusterLifecycleManager:
         self.client = None
         self.cluster = None
         self.cleanup_called = False
+        self.shutdown_event: asyncio.Event | None = None
+        self.loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop):
+        """Attach event loop context for signal handlers"""
+        self.loop = loop
+        self.shutdown_event = asyncio.Event()
+
+    def request_shutdown(self):
+        """Signal the manager to begin shutdown"""
+        if self.shutdown_event and not self.shutdown_event.is_set():
+            self.shutdown_event.set()
 
     async def start_cluster(self):
         """Start the Dask SSH cluster"""
@@ -79,9 +91,11 @@ class ClusterLifecycleManager:
 
     async def wait_for_shutdown(self):
         """Wait indefinitely for shutdown signal"""
+        if not self.shutdown_event:
+            raise RuntimeError("Shutdown event not initialized")
+
         try:
-            # Wait indefinitely until interrupted
-            await asyncio.Event().wait()
+            await self.shutdown_event.wait()
         except asyncio.CancelledError:
             print("\nReceived cancellation signal", file=sys.stderr)
         except KeyboardInterrupt:
@@ -166,15 +180,14 @@ async def main():
     manager = ClusterLifecycleManager(config_path, scheduler_file)
 
     # Setup signal handlers for graceful shutdown
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
+    manager.bind_loop(loop)
 
     def signal_handler(signum, frame):
         """Handle termination signals"""
         print(f"\nReceived signal {signum}", file=sys.stderr)
-        # Create cleanup task
-        asyncio.create_task(manager.cleanup())
-        # Stop the loop
-        loop.stop()
+        # Request orderly shutdown without abruptly stopping the loop
+        loop.call_soon_threadsafe(manager.request_shutdown)
 
     # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
@@ -193,6 +206,11 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nForced exit", file=sys.stderr)
         sys.exit(0)
+    except RuntimeError as e:
+        if str(e) == "Event loop stopped before Future completed.":
+            # Expected when parent process stops the loop after requesting cleanup
+            sys.exit(0)
+        raise
     except Exception as e:
         print(f"\nFATAL ERROR: {e}", file=sys.stderr)
         import traceback
