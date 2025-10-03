@@ -4,7 +4,7 @@
 Step 2: Advanced baseline/median subtraction using Dask distributed computing
 
 This script implements two processing modes:
-1. Photon data (ph*): Pedestal subtraction with 5-sigma thresholding
+1. Pulse-height data (ph*): Pedestal subtraction with 5-sigma thresholding
 2. Image data (img*): 8x8 block median + temporal median subtraction
 
 UPDATED: Now accepts existing Dask scheduler address instead of creating cluster
@@ -41,7 +41,7 @@ def load_config(config_path: str = "config.toml"):
         'codec': 'blosc-lz4',
         'level': 5,
         'compute_chunk_size': 8192,
-        # Photon data specific
+        # Pulse-height data specific
         'ph_baseline_offset': 800,
         'ph_sigma_threshold': 5,
         # Image data specific

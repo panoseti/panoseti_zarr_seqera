@@ -491,7 +491,7 @@ async def convert_pff_stream_to_zarr(
                 start_frame_hint = (byte_start // frame_size)
 
                 work_chunks.append((
-                    pff_path, byte_start, byte_end, header_size, img_data_size, frame_size,
+                    os.path.abspath(pff_path), byte_start, byte_end, header_size, img_data_size, frame_size,
                     W, np_img_dtype, header_kind, start_frame_hint
                 ))
 
@@ -645,6 +645,7 @@ def load_config(config_path: str = None):
 
 
 async def main():
+    original_umask = os.umask(0o000)
     if len(sys.argv) < 3:
         print("Usage: python step1_pff_to_zarr.py <obs_dir> <output_zarr_dir> [config.toml] [scheduler_address]")
         print()
@@ -731,6 +732,7 @@ async def main():
         if client:
             print("\n✓ Keeping cluster alive for next task...")
             await client.close()
+        os.umask(original_umask)
 
 
 if __name__ == "__main__":

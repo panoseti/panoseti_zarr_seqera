@@ -4,7 +4,7 @@
 [cluster]
 # Cluster type determines which backend to use
 # Supported types: "ssh", "local"
-type = "local"
+type = "ssh"
 
 # Cluster state management
 use_cluster = false  # Set to true to enable distributed computing
