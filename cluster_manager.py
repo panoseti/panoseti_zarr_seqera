@@ -311,7 +311,8 @@ ClusterFactory.register_backend(LocalClusterBackend())
 def load_cluster_config(config_path: str = "config.toml") -> dict:
     """Load cluster configuration from TOML file"""
     config = {
-        'use_dask': False,
+        'use_cluster': False,
+        'use_dask': False,  # Legacy support
         'type': 'local',
     }
 
@@ -326,7 +327,12 @@ def load_cluster_config(config_path: str = "config.toml") -> dict:
 
             if 'cluster' in toml_config:
                 cluster_config = toml_config['cluster']
-                config['use_dask'] = cluster_config.get('use_dask', False)
+                if 'use_cluster' in cluster_config:
+                    config['use_cluster'] = cluster_config['use_cluster']
+                    config['use_dask'] = cluster_config['use_cluster']
+                elif 'use_dask' in cluster_config:
+                    config['use_dask'] = cluster_config['use_dask']
+                    config['use_cluster'] = cluster_config['use_dask']
                 config['type'] = cluster_config.get('type', 'local')
 
                 # Load type-specific configuration
@@ -338,7 +344,7 @@ def load_cluster_config(config_path: str = "config.toml") -> dict:
 
             print(f"Loaded cluster configuration from {config_path}")
             print(f"  Cluster type: {config['type']}")
-            print(f"  Cluster enabled: {config['use_dask']}")
+            print(f"  Cluster enabled: {config['use_cluster']}")
         except Exception as e:
             print(f"Warning: Could not read config file: {e}")
 
@@ -352,9 +358,9 @@ async def create_cluster(config: dict) -> Tuple[Optional[Client], Optional[Any]]
     Returns:
         Tuple of (Client, Cluster) or (None, None) if clustering is disabled
     """
-    use_dask = config.get('use_dask', False)
+    use_cluster = config.get('use_cluster', False)
 
-    if not use_dask:
+    if not use_cluster:
         print("Cluster disabled - operations will use local processing")
         return None, None
 
