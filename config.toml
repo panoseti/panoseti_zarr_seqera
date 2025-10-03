@@ -9,7 +9,7 @@
 
 [cluster]
 # Dask Cluster Configuration (created once, reused for all operations)
-use_dask = true  # Set to false to use local multiprocessing instead
+use_dask = false  # Set to false to use local multiprocessing instead
 
 # SSH Cluster Configuration
 ssh_hosts = ["localhost", "panoseti-dfs0", "panoseti-dfs1", "panoseti-dfs2"]
