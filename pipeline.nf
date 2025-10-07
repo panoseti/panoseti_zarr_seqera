@@ -45,12 +45,7 @@ process dask_baseline {
     """
     # Find all L0 Zarr directories within the input l0_zarr_base_dir
     find ${l0_zarr_base_dir} -maxdepth 1 -type d -name "*.zarr" | while read L0_ZARR; do
-        BASENAME_ZARR=\$(basename "\$L0_ZARR" .zarr)
-        L1_ZARR="${params.output_l1_dir}/\${BASENAME_ZARR}_L1.zarr"
-        python ${step2_script} \
-            "$L0_ZARR" \
-            "$L1_ZARR" \
-            --config "${config_file}"
+        BASENAME_ZARR=\\$(basename \"\\\${L0_ZARR}\" .zarr)\n        L1_ZARR=\"${params.output_l1_dir}/\\${BASENAME_ZARR}_L1.zarr\"\n        python ${step2_script} \\\n            \"\\\${L0_ZARR}\" \\\n            \"$L1_ZARR\" \\\n            --config \"${config_file}\"
     done
     """
 }
