@@ -19,7 +19,7 @@ process pff_to_zarr {
 
     script:
     """
-    uv run python step1_pff_to_zarr.py \
+    python step1_pff_to_zarr.py \
         ${obs_dir} \
         ${params.output_l0_dir} \
         ${config_file}
@@ -43,7 +43,7 @@ process dask_baseline {
     find ${l0_zarr_base_dir} -maxdepth 1 -type d -name "*.zarr" | while read L0_ZARR; do
         BASENAME_ZARR=\$(basename "\$L0_ZARR" .zarr)
         L1_ZARR="${params.output_l1_dir}/${BASENAME_ZARR}_L1.zarr"
-        uv run python step2_dask_baseline.py \
+        python step2_dask_baseline.py \
             "$L0_ZARR" \
             "$L1_ZARR" \
             --config "${config_file}"
