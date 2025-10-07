@@ -507,7 +507,7 @@ async def convert_pff_stream_to_zarr(
 
             # Submit work to cluster
             futures = client.map(read_sequential_chunk_worker, work_chunks)
-            gathered = await client.gather(futures)
+            gathered = client.gather(futures)
 
             results = []
             for result in gathered:
@@ -742,12 +742,16 @@ async def main():
 
     finally:
         # Close client connection and shutdown local cluster if it was started by this script
-        if client:
+        if client is not None:
             print("\n✓ Closing Dask client...")
-            await client.close()
+            close_future = client.close()
+            if close_future is not None:
+                await close_future
         if local_cluster:
             print("✓ Shutting down local Dask cluster...")
-            await local_cluster.close()
+            close_future_cluster = local_cluster.close()
+            if close_future_cluster is not None:
+                await close_future_cluster
         os.umask(original_umask)
 
 
