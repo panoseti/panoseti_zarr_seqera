@@ -9,7 +9,7 @@ params.config_file = "config.toml"
 // Process for step1_pff_to_zarr.py
 process pff_to_zarr {
     publishDir "${params.outdir}/${params.output_l0_dir}", mode: 'copy'
-    container 'oras://community.wave.seqera.io/library/pip_blosc_dask_distributed_pruned:c32f1c56c9a5c26c'
+    container 'oras://ghcr.io/zonca/singularity_dask_zarr:latest'
 
     input:
         path obs_dir
@@ -31,7 +31,7 @@ process pff_to_zarr {
 process dask_baseline {
     publishDir "${params.outdir}/${params.output_l1_dir}", mode: 'copy'
 
-    container 'oras://community.wave.seqera.io/library/pip_blosc_dask_distributed_pruned:c32f1c56c9a5c26c'
+    container 'oras://ghcr.io/zonca/singularity_dask_zarr:latest'
     input:
         path l0_zarr_base_dir // This will be the base directory for L0 Zarrs
         path config_file
