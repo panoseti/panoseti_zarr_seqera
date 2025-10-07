@@ -14,7 +14,7 @@ process pff_to_zarr {
     input:
         path obs_dir
         path config_file
-        path step1_script from file("step1_pff_to_zarr.py")
+        path step1_script
 
     output:
         path "${params.output_l0_dir}" // Output L0 Zarr directory
@@ -36,7 +36,7 @@ process dask_baseline {
     input:
         path l0_zarr_base_dir // This will be the base directory for L0 Zarrs
         path config_file
-        path step2_script from file("step2_dask_baseline.py")
+        path step2_script
 
     output:
         path "${params.output_l1_dir}" // Output L1 Zarr directory
@@ -59,10 +59,12 @@ workflow {
     // Create channels for inputs
     input_obs_ch = Channel.fromPath(params.input_obs_dir)
     config_file_ch = Channel.fromPath(params.config_file)
+    step1_script_ch = Channel.fromPath("step1_pff_to_zarr.py")
+    step2_script_ch = Channel.fromPath("step2_dask_baseline.py")
 
     // Run pff_to_zarr process
-    pff_to_zarr(input_obs_ch, config_file_ch)
+    pff_to_zarr(input_obs_ch, config_file_ch, step1_script_ch)
 
     // Run dask_baseline process, taking output from pff_to_zarr
-    dask_baseline(pff_to_zarr.out, config_file_ch)
+    dask_baseline(pff_to_zarr.out, config_file_ch, step2_script_ch)
 }
