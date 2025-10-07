@@ -327,7 +327,7 @@ async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict
         if use_distributed:
             print("Computing with Dask cluster...")
             futures = client.compute(store_operation)
-            result = await client.gather(futures)
+            result = client.gather(futures)
         else:
             print("Computing locally with Dask...")
             with ProgressBar():
@@ -418,10 +418,14 @@ Examples:
         # Close client connection and shutdown local cluster if it was started by this script
         if client:
             print("\n  ✓ Closing Dask client...")
-            await client.close()
+            close_future = client.close()
+            if close_future is not None:
+                await close_future
         if local_cluster:
             print("  ✓ Shutting down local Dask cluster...")
-            await local_cluster.close()
+            close_future_cluster = local_cluster.close()
+            if close_future_cluster is not None:
+                await close_future_cluster
 
 
 def main():
