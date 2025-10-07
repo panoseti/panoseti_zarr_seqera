@@ -43,6 +43,9 @@ process dask_baseline {
 
     script:
     """
+    # Create the output L1 Zarr directory if it doesn't exist
+    mkdir -p ${params.output_l1_dir}
+
     # Find all L0 Zarr directories within the input l0_zarr_base_dir
     find ${l0_zarr_base_dir} -maxdepth 1 -type d -name "*.zarr" | while read L0_ZARR; do
         BASENAME_ZARR=\$(basename "\$L0_ZARR" .zarr)
