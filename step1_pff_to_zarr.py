@@ -31,7 +31,7 @@ from collections import defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import cpu_count
 import pff
-from dask.distributed import Client
+from dask.distributed import Client, LocalCluster
 from typing import List, Tuple, Dict
 
 # Try to import tomli/tomllib for TOML support
@@ -275,21 +275,31 @@ def group_pff_files_by_stream(obs_dir: str) -> Dict[Tuple[str, str], List[Tuple[
 
 
 async def connect_to_dask(scheduler_address: str):
-    """Connect to existing Dask scheduler"""
+    """Connect to existing Dask scheduler or start a local one"""
+    client = None
+    cluster = None
     if not scheduler_address:
-        print("No Dask scheduler address provided - using local multiprocessing")
-        return None
+        print("No Dask scheduler address provided - starting a local Dask cluster")
+        try:
+            cluster = LocalCluster(n_workers=os.cpu_count() or 4, processes=True, threads_per_worker=1)
+            client = await Client(cluster, asynchronous=True)
+            print(f"  ✓ Local Dask cluster started at: {client.scheduler_info()['address']}")
+            return client, cluster
+        except Exception as e:
+            print(f"Error starting local Dask cluster: {e}")
+            print("Falling back to local multiprocessing")
+            return None, None
 
     try:
         print(f"Connecting to Dask scheduler: {scheduler_address}")
         client = await Client(scheduler_address, asynchronous=True)
         worker_info = client.scheduler_info()
         print(f"  ✓ Connected! Workers: {len(worker_info['workers'])}")
-        return client
+        return client, None # No local cluster to manage if connecting to existing
     except Exception as e:
         print(f"Warning: Could not connect to Dask scheduler: {e}")
         print("Falling back to local multiprocessing")
-        return None
+        return None, None
 
 
 async def convert_pff_stream_to_zarr(
@@ -694,8 +704,11 @@ async def main():
 
     # Connect to Dask cluster if address provided
     client = None
+    local_cluster = None # New variable to hold local cluster object
     if scheduler_address:
-        client = await connect_to_dask(scheduler_address)
+        client, local_cluster = await connect_to_dask(scheduler_address)
+    else:
+        client, local_cluster = await connect_to_dask(None) # Call with None to trigger local cluster creation
 
     try:
         # Process each stream
@@ -728,10 +741,13 @@ async def main():
         print(f"{'='*80}")
 
     finally:
-        # Close client connection (but don't shutdown cluster)
+        # Close client connection and shutdown local cluster if it was started by this script
         if client:
-            print("\n✓ Keeping cluster alive for next task...")
+            print("\n✓ Closing Dask client...")
             await client.close()
+        if local_cluster:
+            print("✓ Shutting down local Dask cluster...")
+            await local_cluster.close()
         os.umask(original_umask)
 
 
