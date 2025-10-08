@@ -21,7 +21,7 @@ import dask
 import dask.array as da
 from pathlib import Path
 import time
-from dask.distributed import Client, wait
+from dask.distributed import Client, wait, LocalCluster
 from dask.diagnostics import ProgressBar
 
 # Try to import tomli/tomllib
@@ -71,21 +71,31 @@ def load_config(config_path: str = "config.toml"):
 
 
 async def connect_to_dask(scheduler_address: str):
-    """Connect to existing Dask scheduler"""
+    """Connect to existing Dask scheduler or start a local one"""
+    client = None
+    cluster = None
     if not scheduler_address:
-        print("No Dask scheduler address provided - using local threading")
-        return None
+        print("No Dask scheduler address provided - starting a local Dask cluster")
+        try:
+            cluster = LocalCluster(n_workers=os.cpu_count() or 4, processes=True, threads_per_worker=1)
+            client = await Client(cluster, asynchronous=True)
+            print(f"  ✓ Local Dask cluster started at: {client.scheduler_info()['address']}")
+            return client, cluster
+        except Exception as e:
+            print(f"Error starting local Dask cluster: {e}")
+            print("Falling back to local threading")
+            return None, None
 
     try:
         print(f"Connecting to Dask scheduler: {scheduler_address}")
         client = await Client(scheduler_address, asynchronous=True)
         worker_info = client.scheduler_info()
         print(f"  ✓ Connected! Workers: {len(worker_info['workers'])}")
-        return client
+        return client, None # No local cluster to manage if connecting to existing
     except Exception as e:
         print(f"Warning: Could not connect to Dask scheduler: {e}")
         print("Falling back to local threading")
-        return None
+        return None, None
 
 
 def detect_data_product(zarr_path: str) -> str:
@@ -317,7 +327,7 @@ async def baseline_subtract_dask(zarr_input: str, zarr_output: str, config: dict
         if use_distributed:
             print("Computing with Dask cluster...")
             futures = client.compute(store_operation)
-            result = await client.gather(futures)
+            result = client.gather(futures)
         else:
             print("Computing locally with Dask...")
             with ProgressBar():
@@ -396,16 +406,26 @@ Examples:
 
     # Connect to Dask cluster if scheduler provided
     client = None
+    local_cluster = None
     if args.dask_scheduler:
-        client = await connect_to_dask(args.dask_scheduler)
+        client, local_cluster = await connect_to_dask(args.dask_scheduler)
+    else:
+        client, local_cluster = await connect_to_dask(None) # Call with None to trigger local cluster creation
 
     try:
         await baseline_subtract_dask(args.input_zarr, args.output_zarr, config, client)
     finally:
-        # Close client connection (but don't shutdown cluster)
+        # Close client connection and shutdown local cluster if it was started by this script
         if client:
-            print("\n  Keeping cluster alive for next task...")
-            await client.close()
+            print("\n  ✓ Closing Dask client...")
+            close_future = client.close()
+            if close_future is not None:
+                await close_future
+        if local_cluster:
+            print("  ✓ Shutting down local Dask cluster...")
+            close_future_cluster = local_cluster.close()
+            if close_future_cluster is not None:
+                await close_future_cluster
 
 
 def main():

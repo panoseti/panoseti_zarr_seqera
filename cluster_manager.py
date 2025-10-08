@@ -93,8 +93,8 @@ class SSHClusterBackend(ClusterBackend):
             connect_options={"known_hosts": None},
             worker_options={
                 "nthreads": threads_per_worker,
-                "memory_limit": memory_per_worker,
                 "preload": [preload_command],
+                "local_directory": config.get('local_directory', os.environ.get('SCRATCH_DIR')),
             },
             scheduler_options={
                 "port": scheduler_port,
