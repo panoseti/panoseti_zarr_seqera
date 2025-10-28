@@ -5,6 +5,7 @@ params.input_obs_dir = "obs_TEST.pffd"
 params.output_l0_dir = "L0_zarr"
 params.output_l1_dir = "L1_zarr"
 params.config_file = "config.toml"
+params.outdir = "."
 
 // Process for step1_pff_to_zarr.py
 process pff_to_zarr {
@@ -59,13 +60,13 @@ process dask_baseline {
 }
 
 workflow {
-    // Create channels for inputs
-    input_obs_ch = Channel.fromPath(params.input_obs_dir)
-    config_file_ch = Channel.fromPath(params.config_file)
+    main:
+        input_obs_ch = Channel.fromPath(params.input_obs_dir)
+        config_file_ch = Channel.fromPath(params.config_file)
 
-    // Run pff_to_zarr process and capture its output
-    pff_to_zarr_output = pff_to_zarr(input_obs_ch, config_file_ch)
+        pff_to_zarr(input_obs_ch, config_file_ch)
+        dask_baseline(pff_to_zarr.out, config_file_ch)
 
-    // Run dask_baseline process, taking output from pff_to_zarr
-    dask_baseline(pff_to_zarr_output.out, config_file_ch)
+    emit:
+        dask_baseline.out
 }
