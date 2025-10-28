@@ -63,12 +63,10 @@ process dask_baseline {
 workflow {
     main:
         input_obs_ch = Channel.fromPath(params.input_obs_dir)
-        config_file_ch = Channel.fromPath(params.config_file)
+        config_file_obj = file(params.config_file)
 
-        config_file_ch.into { config_for_step1; config_for_step2 }
-
-        pff_to_zarr(input_obs_ch, config_for_step1)
-        dask_baseline(pff_to_zarr.out, config_for_step2)
+        pff_to_zarr(input_obs_ch, config_file_obj)
+        dask_baseline(pff_to_zarr.out, config_file_obj)
 
     emit:
         dask_baseline.out
