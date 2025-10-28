@@ -50,7 +50,8 @@ process dask_baseline {
     # Find all L0 Zarr directories within the input l0_zarr_base_dir
     find ${l0_zarr_base_dir} -maxdepth 1 -type d -name "*.zarr" | while read L0_ZARR; do
         BASENAME_ZARR=\$(basename "\$L0_ZARR" .zarr)
-        L1_ZARR="${params.output_l1_dir}/\$BASENAME_ZARR_L1.zarr"
+        BASENAME_ZARR_L1="\${BASENAME_ZARR}_L1"
+        L1_ZARR="${params.output_l1_dir}/\${BASENAME_ZARR_L1}.zarr"
         python step2_dask_baseline.py \
             "\$L0_ZARR" \
             "\$L1_ZARR" \
@@ -64,8 +65,10 @@ workflow {
         input_obs_ch = Channel.fromPath(params.input_obs_dir)
         config_file_ch = Channel.fromPath(params.config_file)
 
-        pff_to_zarr(input_obs_ch, config_file_ch)
-        dask_baseline(pff_to_zarr.out, config_file_ch)
+        config_file_ch.into { config_for_step1; config_for_step2 }
+
+        pff_to_zarr(input_obs_ch, config_for_step1)
+        dask_baseline(pff_to_zarr.out, config_for_step2)
 
     emit:
         dask_baseline.out
