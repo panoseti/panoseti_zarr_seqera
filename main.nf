@@ -11,11 +11,10 @@ params.outdir = "."
 process pff_to_zarr {
     publishDir "${params.outdir}/${params.output_l0_dir}", mode: 'copy'
     container 'oras://ghcr.io/zonca/singularity_dask_zarr:latest'
-    file 'step1_pff_to_zarr.py', 'pff.py'
+    file 'step1_pff_to_zarr.py', 'pff.py', params.config_file
 
     input:
         path obs_dir
-        path config_file
 
     output:
         path "${params.output_l0_dir}" // Output L0 Zarr directory
@@ -25,7 +24,7 @@ process pff_to_zarr {
     python step1_pff_to_zarr.py \
         ${obs_dir} \
         ${params.output_l0_dir} \
-        ${config_file}
+        ${params.config_file}
     """
 }
 
@@ -34,10 +33,9 @@ process dask_baseline {
     publishDir "${params.outdir}/${params.output_l1_dir}", mode: 'copy'
 
     container 'oras://ghcr.io/zonca/singularity_dask_zarr:latest'
-    file 'step2_dask_baseline.py', 'pff.py'
+    file 'step2_dask_baseline.py', 'pff.py', params.config_file
     input:
         path l0_zarr_base_dir // This will be the base directory for L0 Zarrs
-        path config_file
 
     output:
         path "${params.output_l1_dir}" // Output L1 Zarr directory
@@ -55,7 +53,7 @@ process dask_baseline {
         python step2_dask_baseline.py \
             "\$L0_ZARR" \
             "\$L1_ZARR" \
-            --config "${config_file}"
+            --config "${params.config_file}"
     done
     """
 }
@@ -63,11 +61,8 @@ process dask_baseline {
 workflow {
     main:
         input_obs_ch = Channel.fromPath(params.input_obs_dir)
-        config_for_step1 = Channel.value(file(params.config_file))
-        config_for_step2 = Channel.value(file(params.config_file))
-
-        l0_results = pff_to_zarr(input_obs_ch, config_for_step1)
-        dask_baseline(l0_results.out, config_for_step2)
+        pff_to_zarr(input_obs_ch)
+        dask_baseline(pff_to_zarr.out)
 
     emit:
         dask_baseline.out
