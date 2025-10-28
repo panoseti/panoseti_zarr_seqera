@@ -95,7 +95,8 @@ If you do not have SLURM or Expanse paths available, create a development profil
 
 ## Troubleshooting
 
-- **`DuplicateProcessInvocation` errors:** Nextflow flags this when the same process instance is invoked multiple times with shared channel consumers. The pipeline now stages `config.toml` directly via each process’ `file` directive, so avoid reintroducing shared config channels unless you split them with dedicated clones (e.g., `config_file_ch.into { a; b }` with distinct process bindings).
+- **`DuplicateProcessInvocation` errors:** Nextflow flags this when the same process instance is invoked multiple times with shared channel consumers. The current workflow avoids this by passing the resolved config path (expanded against `${projectDir}` when relative) as a plain value per process—keep that pattern unless you explicitly clone channels with `into { ... }`.
+- **Missing helper scripts/config in SLURM scratch:** Tower jobs run from node-local scratch created in the `beforeScript`. Helper scripts are invoked via `${projectDir}/step*_*.py` and `${projectDir}/config.toml` so they’re available regardless of staging; if you move files, update those references and ensure the new location is mounted inside the container.
 - **Tower run stuck at `SUBMITTED`:** Check that the `expanse-compute-3` environment is healthy and that the SLURM `debug` queue has available slots. Review the workflow log via `tw runs view ... download --type log`.
 - **Container resolution issues:** Ensure Singularity/Apptainer can reach `ghcr.io`; if running locally without ORAS support, pull the image manually or update the container reference to a format supported in your environment.
 - **Output directories missing:** Both stages publish results under `params.outdir`. Confirm `params.outdir` points to a writable path and that the compute environment grants write access.

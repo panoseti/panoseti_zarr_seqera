@@ -5,7 +5,7 @@ Project insights
 - Workflow parameters default to local test artifacts (`obs_TEST.pffd`, `config.toml`) and emit results under `params.outdir`.
 - `nextflow.config` exposes a single `slurm_debug` profile that submits to Expanse via SLURM (`debug` queue), stages work under `/expanse/lustre/scratch/$USER/temp_project`, and enables timeline/report/trace artifacts (written into `logs/`).
 - Pipeline fetches dependencies (`step1_pff_to_zarr.py`, `step2_dask_baseline.py`, `pff.py`) from the repo and uses Singularity with node-local scratch exported through `TMPDIR`/`SCRATCH_DIR`.
-- Recent production issue: passing the config file through shared channels caused Nextflow to flag a duplicate process invocation; staging `config.toml` via each process' `file` directive avoids the reuse while keeping the artifact available at runtime.
+- Recent production issues: (1) duplicate process invocation when reusing a single config channel, and (2) Tower runs failing because helper scripts/config were not present inside the SLURM scratch directory. Current approach avoids both by resolving repository assets via `${projectDir}` and passing the config path as a plain value into each process.
 
 Tower CLI cheatsheet
 --------------------
