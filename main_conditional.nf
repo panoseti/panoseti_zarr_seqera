@@ -132,5 +132,6 @@ workflow {
         dask_baseline_conditional_B(branched_paths.path_B, config_file_path)
 
     emit:
-        dask_baseline_conditional_A.out, dask_baseline_conditional_B.out
+        dask_baseline_conditional_A.out
+        dask_baseline_conditional_B.out
 }
