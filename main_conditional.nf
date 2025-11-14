@@ -12,7 +12,7 @@ params.outdir = "."
 // Process for step1_pff_to_zarr.py
 process pff_to_zarr {
     publishDir "${params.outdir}/${params.output_l0_dir}", mode: 'copy'
-    // container 'oras://ghcr.io/zonca/singularity_dask_zarr:latest'
+    container 'oras://ghcr.io/zonca/singularity_dask_zarr:latest'
 
     input:
         path obs_dir
@@ -23,7 +23,7 @@ process pff_to_zarr {
 
     script:
     """
-    ${projectDir}/.venv/bin/python ${projectDir}/step1_pff_to_zarr.py \
+    python ${projectDir}/step1_pff_to_zarr.py \
         ${obs_dir} \
         ${params.output_l0_dir} \
         ${config_file_path}
