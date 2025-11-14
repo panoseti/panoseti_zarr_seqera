@@ -1,5 +1,7 @@
 #!/usr/bin/env nextflow
 
+nextflow.enable.dsl=2
+
 // Define parameters
 params.input_obs_dir = "obs_TEST.pffd"
 params.output_l0_dir = "L0_zarr"
