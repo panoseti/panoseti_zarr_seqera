@@ -1,6 +1,6 @@
 #!/usr/bin/env nextflow
 
-nextflow.enable.dsl=2
+nextflow.enable.dsl = 2
 
 // Define parameters
 params.input_obs_dir = "obs_TEST.pffd"
