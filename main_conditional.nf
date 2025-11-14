@@ -97,7 +97,7 @@ process random_decision {
 
     script:
     """
-    echo $(($RANDOM % 2))
+    echo \$((RANDOM % 2))
     """
 }
 
