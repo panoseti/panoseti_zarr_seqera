@@ -12,7 +12,7 @@ params.outdir = "."
 // Process for step1_pff_to_zarr.py
 process pff_to_zarr {
     publishDir "${params.outdir}/${params.output_l0_dir}", mode: 'copy'
-    container 'oras://ghcr.io/zonca/singularity_dask_zarr:latest'
+    // container 'oras://ghcr.io/zonca/singularity_dask_zarr:latest'
 
     input:
         path obs_dir
@@ -23,7 +23,7 @@ process pff_to_zarr {
 
     script:
     """
-    python ${projectDir}/step1_pff_to_zarr.py \
+    ${projectDir}/.venv/bin/python ${projectDir}/step1_pff_to_zarr.py \
         ${obs_dir} \
         ${params.output_l0_dir} \
         ${config_file_path}
@@ -93,7 +93,7 @@ process dask_baseline_conditional_B {
 // Process to generate a random decision
 process random_decision {
     output:
-        val decision
+        stdout decision
 
     script:
     """
@@ -119,17 +119,20 @@ workflow {
             .combine(random_decision.out.map { it.trim() })
             .set { combined_ch }
 
-        // Branch based on the random decision
+        // Filter based on the random decision
         combined_ch
-            .branch { l0_zarr_base_dir, decision ->
-                if (decision == "0") emit: path_A: l0_zarr_base_dir
-                else emit: path_B: l0_zarr_base_dir
-            }
-            .set { branched_paths }
+            .filter { l0_zarr_base_dir, decision -> decision == "0" }
+            .map { it[0] } // Extract only l0_zarr_base_dir
+            .set { path_A_ch }
+
+        combined_ch
+            .filter { l0_zarr_base_dir, decision -> decision == "1" }
+            .map { it[0] } // Extract only l0_zarr_base_dir
+            .set { path_B_ch }
 
         // Execute conditional processes
-        dask_baseline_conditional_A(branched_paths.path_A, config_file_path)
-        dask_baseline_conditional_B(branched_paths.path_B, config_file_path)
+        dask_baseline_conditional_A(path_A_ch, config_file_path)
+        dask_baseline_conditional_B(path_B_ch, config_file_path)
 
     emit:
         dask_baseline_conditional_A.out

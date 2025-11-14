@@ -10,6 +10,6 @@ echo "Starting Nextflow pipeline on Expanse..."
 # --output_l1_dir my_l1_output \
 # --config_file my_custom_config.toml
 
-nextflow run main_conditional.nf -profile slurm_debug
+nextflow run main_conditional.nf -w work
 
 echo "Nextflow pipeline submitted."
