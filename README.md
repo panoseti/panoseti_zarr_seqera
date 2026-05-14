@@ -1,108 +1,206 @@
 # PANOSETI Zarr Nextflow Pipeline
 
-This repository orchestrates the two-stage conversion of PANOSETI observation data into hierarchical Zarr stores using Nextflow DSL2 and Seqera Platform (Tower).
+Converts PanoSETI PFF observation data to calibrated Zarr v3 stores using
+**Nextflow 26.04 strict DSL2**. Runs identically on a laptop (local executor)
+and on SDSC Expanse (SLURM + Singularity).
 
-- **Stage 1 – `pff_to_zarr`**: runs `step1_pff_to_zarr.py` to convert `.pffd` observations into L0 Zarr datasets.
-- **Stage 2 – `dask_baseline`**: runs `step2_dask_baseline.py` to aggregate each L0 Zarr into a corresponding L1 Zarr baseline.
-- Both stages execute inside the container image `oras://ghcr.io/zonca/singularity_dask_zarr:latest`.
+## Pipeline stages
 
-The pipeline is typically launched via Tower against SDSC Expanse resources, using a dedicated SLURM debug profile defined in `nextflow.config`.
+```
+.pffd  ──►  PFF_TO_ZARR  ──►  L0/ (one .zarr per product × module)
+                                    │
+                       ┌────────────┴─────────────┐
+                       ▼                          ▼
+               CALIBRATE_PH                CALIBRATE_IMG
+           (ph256, ph1024)              (img8, img16)
+           pedestal subtraction         block-median subtraction
+           n-σ thresholding             + temporal supermedian
+                       │                          │
+                       └────────────┬─────────────┘
+                                    ▼
+                             L1/ (calibrated .zarr + summary.json + preview.png)
+```
 
-## Repository Layout
+**Key design choices (v0.3.0):**
+- Per-product parallelism is Nextflow-native — no Dask cluster required.
+- Output publishing uses the Nextflow 26 `output {}` block (no `publishDir`).
+- Calibration runs synchronously in a single Python process per store; xarray + zstd
+  writes ~GB/s on a laptop and scales to HPC via SLURM without code changes.
+- `ph` and `img` products are calibrated differently:
+  - `ph256`/`ph1024` (`int16` ADC intensities): pedestal subtracted, n-σ masked.
+  - `img8`/`img16` (`uint8`/`uint16` counts above threshold): spatial block-median
+    + temporal supermedian subtracted, then ADC→PE scaled.
 
-| Path | Purpose |
-| ---- | ------- |
-| `main.nf` | Nextflow DSL2 workflow wiring the two processes. Each process stages its scripts plus `config.toml` through the `file` directive. |
-| `nextflow.config` | Tower/Expanse configuration profile (`slurm_debug`) that specifies SLURM options, staging directories under `/expanse/lustre/scratch/$USER/temp_project`, and enables timeline/report/trace outputs under `logs/`. |
-| `config.toml` | Runtime configuration consumed by both processes. |
-| `step1_pff_to_zarr.py`, `step2_dask_baseline.py`, `pff.py` | Python utilities used by the workflow stages. |
-| `obs_TEST.pffd` | Example observation bundle for quick smoke tests. |
-| `run.sh`, `run_expanse.sh`, `run_old.sh` | Helper launch scripts (not used by Tower). |
-| `AGENTS.md` | Maintainer cheatsheet with process notes and Tower CLI quick commands. |
+---
 
-## Requirements
+## Quick start — laptop
 
-- Nextflow `25.04` or newer with DSL2 enabled (Tower launches supply this via the configured compute environment).
-- Access to `oras://ghcr.io/zonca/singularity_dask_zarr:latest` (requires Singularity/Apptainer runtime on the compute nodes).
-- Seqera Platform (Tower) CLI `tw`, authenticated via `TOWER_ACCESS_TOKEN` (sourced from `~/.bashrc` in the SDSC environment).
-- SDSC Expanse workspace `sdsc/panoseti` with the `expanse-compute-3` environment.
-- Input observation directory (`params.input_obs_dir`) and shared filesystem locations referenced in `nextflow.config`.
+```bash
+# 1. Install Python dependencies (requires uv)
+uv sync
+
+# 2. Run against the bundled test data (~seconds)
+nextflow run . -profile laptop
+
+# Results in results/L0/ and results/L1/
+ls results/L0/*.zarr results/L1/*.zarr
+```
+
+Inspect a calibrated store:
+```python
+import xarray as xr
+ds = xr.open_zarr("results/L1/dp_ph256.bpp_2.module_1_L1.zarr", consolidated=False)
+print(ds)                         # shows pedestal_subtracted, unix_t_ns, pkt_num, …
+print(ds.attrs["calibration"])    # params used
+```
+
+---
+
+## Repository layout
+
+```
+panoseti_zarr_seqera/
+├── main.nf                      ← entry workflow (strict DSL2)
+├── nextflow.config              ← params + profiles + report settings
+├── conf/
+│   ├── laptop.config            ← local executor, no container
+│   └── hpc_slurm.config         ← SLURM + singularity
+├── modules/
+│   ├── pff_to_zarr.nf
+│   ├── calibrate_ph.nf
+│   └── calibrate_img.nf
+├── subworkflows/
+│   └── calibrate.nf             ← routes ph vs img products
+├── bin/                         ← executable entry-points (auto on $PATH in processes)
+│   ├── pff2zarr
+│   ├── calibrate_ph
+│   └── calibrate_img
+├── src/panoseti_zarr_pipeline/  ← importable Python package
+│   ├── _common.py               ← shared: open_l0, write_l1, Stats, preview PNG
+│   ├── calibrate_ph.py
+│   └── calibrate_img.py
+├── tests/
+│   ├── test_calibrate_ph.py
+│   └── test_calibrate_img.py
+├── hpc/
+│   ├── run_expanse.sh           ← SDSC Expanse launcher (updated for v0.3)
+│   └── legacy_dask/             ← archived Dask cluster scripts (Andrea Zonca)
+├── obs_TEST.pffd/               ← bundled test observation (img16 + ph256, truncated)
+├── scripts/
+│   └── bench_convert.py         ← PFF→Zarr codec/chunk benchmark harness
+└── pyproject.toml
+```
+
+---
 
 ## Parameters
 
-Default values are defined both in `main.nf` and `nextflow.config`. Override them via a params file or CLI flags.
+All defaults live in `nextflow.config` under `params { … }`. Override on the CLI or via `-params-file`.
 
 | Parameter | Default | Description |
-| --------- | ------- | ----------- |
-| `input_obs_dir` | `obs_TEST.pffd` | Path (file or directory) holding the source PFFD data. |
-| `output_l0_dir` | `L0_zarr` | Name of the directory where L0 Zarr outputs are published. |
-| `output_l1_dir` | `L1_zarr` | Name of the directory where the stage-two L1 Zarr outputs are published. |
-| `config_file` | `config.toml` | Configuration file staged into both processes. |
-| `outdir` | `.` (overridden to Expanse scratch in `slurm_debug`) | Base directory for published outputs. |
+|---|---|---|
+| `input_obs_dir` | `obs_TEST.pffd` | Input `.pffd` observation directory |
+| `outdir` | `results/` | Base output directory (L0/, L1/ published here) |
+| `codec` | `zstd` | Zarr compression codec |
+| `level` | `5` | Compression level |
+| `time_chunk` | `0` (auto) | Time chunk size; 0 = auto-sized by pypff |
+| `ph_sigma` | `5.0` | n-σ threshold for pulse-height masking |
+| `ph_offset` | `800` | ADC offset added before pedestal estimation |
+| `ph_stride` | `200` | Frame stride for pedestal sampling |
+| `img_stride` | `200` | Frame stride for block-median sampling |
+| `img_block` | `8` | Spatial block size (pixels) |
+| `img_adc_to_pe` | `1.5` | ADC counts per photoelectron |
+| `slurm_queue` | `debug` | SLURM queue (HPC profile only) |
+| `slurm_account` | `''` | SLURM account (HPC profile only) |
 
-These values are referenced through `params.<name>` inside the processes; adjust them in a Tower launch or with `-params-file` when running locally.
+---
 
-## Running the Pipeline with Tower CLI
+## Running on SDSC Expanse
 
-1. **Authenticate**
-   ```bash
-   source ~/.bashrc      # exports TOWER_ACCESS_TOKEN and endpoint
-   ```
-
-2. **Confirm workspace and pipeline**
-   ```bash
-   tw organizations list
-   tw workspaces list --organization sdsc
-   tw pipelines list --workspace sdsc/panoseti
-   ```
-
-3. **Inspect recent runs**
-   ```bash
-   tw runs list --workspace sdsc/panoseti --max 5
-   tw runs view --id <runId> --workspace sdsc/panoseti --status
-   tw runs view --id <runId> --workspace sdsc/panoseti download --type log | tail -n 80
-   ```
-
-4. **Launch a new execution**
-   ```bash
-   tw launch panoseti_zarr \
-     --workspace sdsc/panoseti \
-     --profile slurm_debug \
-     --revision main \
-     --name <optional_run_name> \
-     --params-file <optional_params.json>
-   ```
-
-5. **Monitor progress**
-   ```bash
-   tw runs view --id <newRunId> --workspace sdsc/panoseti --status
-   tw runs view --id <newRunId> --workspace sdsc/panoseti tasks
-   ```
-
-The Tower web UI linked in the launch output provides real-time dashboards, timeline, and trace artifacts.
-
-## Running Locally (development)
-
-Local execution is possible for smoke testing, though SLURM-specific settings in `slurm_debug` may not apply. Example:
-
+Transfer data with Globus:
 ```bash
-nextflow run . \
-  -profile slurm_debug \          # or a custom profile that matches your environment
-  -params-file local-params.json
+globus login
+globus transfer <src_endpoint>:/path/to/obs.pffd \
+    <expanse_endpoint>:/expanse/lustre/scratch/$USER/panoseti/inputs/obs.pffd \
+    --recursive
 ```
 
-If you do not have SLURM or Expanse paths available, create a development profile in `nextflow.config` that sets `process.executor = 'local'`, `workDir`, and `params.outdir` to local directories.
+Submit pipeline:
+```bash
+bash hpc/run_expanse.sh \
+    /expanse/lustre/scratch/$USER/panoseti/inputs/obs.pffd \
+    /expanse/lustre/scratch/$USER/panoseti/results
+```
+
+Or via Seqera Tower:
+```bash
+source ~/.bashrc   # loads TOWER_ACCESS_TOKEN
+tw launch panoseti_zarr \
+    --workspace sdsc/panoseti \
+    --profile hpc_slurm \
+    --revision main \
+    --params-file params.json
+```
+
+Example `params.json`:
+```json
+{
+  "input_obs_dir": "/expanse/lustre/scratch/user/panoseti/inputs/obs.pffd",
+  "outdir":        "/expanse/lustre/scratch/user/panoseti/results",
+  "slurm_account": "sds166",
+  "slurm_queue":   "debug"
+}
+```
+
+---
+
+## Tower CLI cheatsheet
+
+```bash
+# Inspect runs
+tw runs list --workspace sdsc/panoseti --max 5
+tw runs view --id <runId> --workspace sdsc/panoseti --status
+tw runs view --id <runId> --workspace sdsc/panoseti download --type log | tail -n 80
+tw runs view --id <runId> --workspace sdsc/panoseti tasks
+
+# Relaunch
+tw launch panoseti_zarr --workspace sdsc/panoseti --profile hpc_slurm --revision main
+```
+
+---
+
+## Testing
+
+Unit tests (no Nextflow required):
+```bash
+uv sync
+uv run pytest tests/ -v
+```
+
+End-to-end smoke (requires Nextflow ≥ 26.04):
+```bash
+nextflow run . -profile laptop --input_obs_dir obs_TEST.pffd --outdir results_smoke
+```
+
+---
 
 ## Troubleshooting
 
-- **`DuplicateProcessInvocation` errors:** Nextflow flags this when the same process instance is invoked multiple times with shared channel consumers. The current workflow avoids this by passing the resolved config path (expanded against `${projectDir}` when relative) as a plain value per process—keep that pattern unless you explicitly clone channels with `into { ... }`.
-- **Missing helper scripts/config in SLURM scratch:** Tower jobs run from node-local scratch created in the `beforeScript`. Helper scripts are invoked via `${projectDir}/step*_*.py` and `${projectDir}/config.toml` so they’re available regardless of staging; if you move files, update those references and ensure the new location is mounted inside the container.
-- **Tower run stuck at `SUBMITTED`:** Check that the `expanse-compute-3` environment is healthy and that the SLURM `debug` queue has available slots. Review the workflow log via `tw runs view ... download --type log`.
-- **Container resolution issues:** Ensure Singularity/Apptainer can reach `ghcr.io`; if running locally without ORAS support, pull the image manually or update the container reference to a format supported in your environment.
-- **Output directories missing:** Both stages publish results under `params.outdir`. Confirm `params.outdir` points to a writable path and that the compute environment grants write access.
+- **Container not found on HPC**: the `hpc_slurm` profile references `panoseti-zarr-pipeline:0.3.0`.
+  Build it with `docker build -t panoseti-zarr-pipeline:0.3.0 .` and convert to SIF for Singularity,
+  or pull from a registry if one has been pushed. The `laptop` profile needs no container.
+- **`ZarrUserWarning` about `summary.json` / `preview.png`**: zarr-python warns about non-Zarr
+  files inside a store directory. These files are intentional (per-store summaries) and the warning
+  is harmless.
+- **SLURM `debug` queue timeout**: the `debug` queue on Expanse has a 30-minute wall limit.
+  Increase `process.time` in `conf/hpc_slurm.config` or switch to `--slurm_queue shared`.
+- **Tower run stuck at `SUBMITTED`**: check that the Expanse compute environment is healthy
+  and the queue has available slots. Use `tw runs view ... download --type log`.
 
-## Contributing
+---
 
-- Keep process scripts idempotent and parameterized; the Nextflow stages rely on deterministic naming (`<basename>_L1.zarr`) for downstream processing.
-- Update `AGENTS.md` when new operational details or Tower instructions arise so on-call teammates can ramp quickly.
-- Run `tw runs view ... download --type log` after each launch to verify the workflow reaches the intended tasks before concluding a change is stable.
+## Relationship to `pypff`
+
+This pipeline depends on `pypff[zarr]` (installed in editable mode from `../pypff`).
+The L0 conversion step (`bin/pff2zarr`) calls `pypff.zarr.convert_run` directly — no
+hand-written PFF parsing. The L0 stores follow the [pypff Zarr v3 spec](../pypff/docs/zarr_v3_spec.md).
