@@ -7,6 +7,9 @@
 
 FROM python:3.13-slim
 
+# procps provides `ps`, required by Nextflow for task metrics collection
+RUN apt-get update && apt-get install -y --no-install-recommends procps && rm -rf /var/lib/apt/lists/*
+
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
