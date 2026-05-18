@@ -49,7 +49,7 @@ def calibrate_ph(
     level: int = 5,
 ) -> None:
     """Convert one L0 ph-mode Zarr store to a calibrated L1 store."""
-    ds = open_l0(l0_store)
+    ds: xr.DataArray = open_l0(l0_store)
     images: xr.DataArray = ds["images"].astype("float32")  # (T, H, W)
 
     # Fix ph1024 quabo ordering (no-op for ph256 since shape is (T,16,16))

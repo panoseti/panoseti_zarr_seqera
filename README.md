@@ -1,8 +1,8 @@
 # PANOSETI Zarr Nextflow Pipeline
 
 Converts PanoSETI PFF observation data to calibrated Zarr v3 stores using
-**Nextflow 26.04 strict DSL2**. Runs identically on a laptop (local executor)
-and on SDSC Expanse (SLURM + Singularity).
+**Nextflow 26.04 strict DSL2**. Runs identically on a laptop (no container),
+in Docker, and on SDSC Expanse (SLURM + Singularity).
 
 ## Pipeline stages
 
@@ -23,7 +23,7 @@ and on SDSC Expanse (SLURM + Singularity).
 
 **Key design choices (v0.3.0):**
 - Per-product parallelism is Nextflow-native — no Dask cluster required.
-- Output publishing uses the Nextflow 26 `output {}` block (no `publishDir`).
+- Output publishing uses the Nextflow 26 `output {}` block (no deprecated `publishDir`).
 - Calibration runs synchronously in a single Python process per store; xarray + zstd
   writes ~GB/s on a laptop and scales to HPC via SLURM without code changes.
 - `ph` and `img` products are calibrated differently:
@@ -33,7 +33,17 @@ and on SDSC Expanse (SLURM + Singularity).
 
 ---
 
-## Quick start — laptop
+## Profiles
+
+| Profile | Executor | Container | When to use |
+|---|---|---|---|
+| `laptop` | local | none (uses `.venv`) | Development, quick smoke tests |
+| `docker` | local | Docker | Reproducible local runs, CI |
+| `hpc_slurm` | SLURM | Singularity | Expanse / any SLURM cluster |
+
+---
+
+## Quick start — laptop (no container)
 
 ```bash
 # 1. Install Python dependencies (requires uv)
@@ -46,13 +56,46 @@ nextflow run . -profile laptop
 ls results/L0/*.zarr results/L1/*.zarr
 ```
 
-Inspect a calibrated store:
+---
+
+## Quick start — Docker
+
+Build the image once (from the **parent** `panoseti/` directory, not this repo):
+
+```bash
+cd ..   # go to ~/panoseti/
+docker build -t panoseti-zarr-pipeline:0.3.0 \
+    -f panoseti_zarr_seqera/Dockerfile .
+```
+
+Then run:
+
+```bash
+cd panoseti_zarr_seqera
+nextflow run . -profile docker
+```
+
+The `docker` profile uses the local executor with the container — no SLURM needed.
+
+---
+
+## Inspecting results
+
 ```python
 import xarray as xr
+
+# L0 store (raw, converted from PFF)
+ds_l0 = xr.open_zarr("results/L0/obs_TEST.pffd.dp_ph256.bpp_2.module_1.debug_TRUNCATED.zarr",
+                      consolidated=False)
+print(ds_l0)               # images, unix_t_ns, pkt_num, quabo_num, …
+
+# L1 store (calibrated)
 ds = xr.open_zarr("results/L1/dp_ph256.bpp_2.module_1_L1.zarr", consolidated=False)
-print(ds)                         # shows pedestal_subtracted, unix_t_ns, pkt_num, …
-print(ds.attrs["calibration"])    # params used
+print(ds)                  # pedestal_subtracted, hot_pixel_mask, unix_t_ns, …
+print(ds.attrs["calibration"])   # params used
 ```
+
+Each L1 store also contains `summary.json` (statistics) and `preview.png` (quick-look plot).
 
 ---
 
@@ -61,10 +104,12 @@ print(ds.attrs["calibration"])    # params used
 ```
 panoseti_zarr_seqera/
 ├── main.nf                      ← entry workflow (strict DSL2)
-├── nextflow.config              ← params + profiles + report settings
+├── nextflow.config              ← params + profiles + outputDir + reports
+├── Dockerfile                   ← image build (context = parent panoseti/ dir)
 ├── conf/
 │   ├── laptop.config            ← local executor, no container
-│   └── hpc_slurm.config         ← SLURM + singularity
+│   ├── docker.config            ← local executor + Docker
+│   └── hpc_slurm.config         ← SLURM + Singularity
 ├── modules/
 │   ├── pff_to_zarr.nf
 │   ├── calibrate_ph.nf
@@ -83,7 +128,7 @@ panoseti_zarr_seqera/
 │   ├── test_calibrate_ph.py
 │   └── test_calibrate_img.py
 ├── hpc/
-│   ├── run_expanse.sh           ← SDSC Expanse launcher (updated for v0.3)
+│   ├── run_expanse.sh           ← SDSC Expanse launcher
 │   └── legacy_dask/             ← archived Dask cluster scripts (Andrea Zonca)
 ├── obs_TEST.pffd/               ← bundled test observation (img16 + ph256, truncated)
 ├── scripts/
@@ -110,8 +155,8 @@ All defaults live in `nextflow.config` under `params { … }`. Override on the C
 | `img_stride` | `200` | Frame stride for block-median sampling |
 | `img_block` | `8` | Spatial block size (pixels) |
 | `img_adc_to_pe` | `1.5` | ADC counts per photoelectron |
-| `slurm_queue` | `debug` | SLURM queue (HPC profile only) |
-| `slurm_account` | `''` | SLURM account (HPC profile only) |
+| `slurm_queue` | `debug` | SLURM queue (`hpc_slurm` profile only) |
+| `slurm_account` | `''` | SLURM account (`hpc_slurm` profile only) |
 
 ---
 
@@ -125,11 +170,29 @@ globus transfer <src_endpoint>:/path/to/obs.pffd \
     --recursive
 ```
 
-Submit pipeline:
+Build the Singularity image from Docker (on a machine with Docker):
+```bash
+cd ~/panoseti
+docker build -t panoseti-zarr-pipeline:0.3.0 -f panoseti_zarr_seqera/Dockerfile .
+# Then on Expanse:
+singularity pull panoseti-zarr-pipeline_0.3.0.sif docker://panoseti-zarr-pipeline:0.3.0
+```
+
+Submit via the convenience script:
 ```bash
 bash hpc/run_expanse.sh \
     /expanse/lustre/scratch/$USER/panoseti/inputs/obs.pffd \
     /expanse/lustre/scratch/$USER/panoseti/results
+```
+
+Or directly:
+```bash
+nextflow run . -profile hpc_slurm \
+    --input_obs_dir /expanse/lustre/scratch/$USER/panoseti/inputs/obs.pffd \
+    --outdir        /expanse/lustre/scratch/$USER/panoseti/results \
+    --slurm_account sds166 \
+    --slurm_queue   debug \
+    -resume
 ```
 
 Or via Seqera Tower:
@@ -171,27 +234,32 @@ tw launch panoseti_zarr --workspace sdsc/panoseti --profile hpc_slurm --revision
 
 ## Testing
 
-Unit tests (no Nextflow required):
+Unit tests (no Nextflow or container required):
 ```bash
 uv sync
 uv run pytest tests/ -v
 ```
 
-End-to-end smoke (requires Nextflow ≥ 26.04):
+End-to-end smoke — laptop:
 ```bash
 nextflow run . -profile laptop --input_obs_dir obs_TEST.pffd --outdir results_smoke
+```
+
+End-to-end smoke — Docker:
+```bash
+nextflow run . -profile docker --input_obs_dir obs_TEST.pffd --outdir results_smoke
 ```
 
 ---
 
 ## Troubleshooting
 
-- **Container not found on HPC**: the `hpc_slurm` profile references `panoseti-zarr-pipeline:0.3.0`.
-  Build it with `docker build -t panoseti-zarr-pipeline:0.3.0 .` and convert to SIF for Singularity,
-  or pull from a registry if one has been pushed. The `laptop` profile needs no container.
-- **`ZarrUserWarning` about `summary.json` / `preview.png`**: zarr-python warns about non-Zarr
-  files inside a store directory. These files are intentional (per-store summaries) and the warning
-  is harmless.
+- **Docker image not found**: build it from the parent `panoseti/` directory with
+  `docker build -t panoseti-zarr-pipeline:0.3.0 -f panoseti_zarr_seqera/Dockerfile .`
+  The build context must be the parent directory because `pypff/` is a sibling of this repo.
+- **`ZarrUserWarning` about `summary.json` / `preview.png`**: zarr-python warns about
+  non-Zarr files inside a store directory. These files are intentional (per-store summaries)
+  and the warning is harmless.
 - **SLURM `debug` queue timeout**: the `debug` queue on Expanse has a 30-minute wall limit.
   Increase `process.time` in `conf/hpc_slurm.config` or switch to `--slurm_queue shared`.
 - **Tower run stuck at `SUBMITTED`**: check that the Expanse compute environment is healthy
