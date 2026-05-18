@@ -19,19 +19,20 @@
  */
 
 include { PFF_TO_ZARR } from './modules/pff_to_zarr.nf'
-include { CALIBRATE   } from './subworkflows/calibrate.nf'
+include { CALIBRATE } from './subworkflows/calibrate.nf'
 
 workflow {
+
     main:
     // ── Stage 1: PFF → L0 Zarr ───────────────────────────────────────────────
-    obs = Channel.fromPath(params.input_obs_dir, type: 'dir', checkIfExists: true)
-    l0  = PFF_TO_ZARR(obs)
+    obs = channel.fromPath(params.input_obs_dir, type: 'dir', checkIfExists: true)
+    l0 = PFF_TO_ZARR(obs)
 
     // Fan out: parse manifest.tsv → one tuple per (product, l0_store, kind).
     // manifest.tsv columns: product <TAB> store <TAB> kind
     stores = l0.manifest
-               .splitCsv(header: true, sep: '\t')
-               .map { row -> tuple(row.product, file(row.store, checkIfExists: true), row.kind) }
+        .splitCsv(header: true, sep: '\t')
+        .map { row -> tuple(row.product, file(row.store, checkIfExists: true), row.kind) }
 
     // ── Stage 2: Calibration (ph or img, in parallel per store) ──────────────
     l1 = CALIBRATE(stores)
@@ -44,14 +45,11 @@ workflow {
 // ── Output block (replaces publishDir) ───────────────────────────────────────
 // outputDir is set to params.outdir in nextflow.config.
 output {
-    // l0_stores is the L0/ directory itself — publish it directly under outdir
-    // so it lands as results/L0/<stores>, not results/L0/L0/<stores>.
     l0_stores {
         path '.'
         mode 'copy'
         overwrite true
     }
-
     l1_stores {
         path 'L1'
         mode 'copy'

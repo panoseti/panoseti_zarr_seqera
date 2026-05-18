@@ -12,7 +12,7 @@ process PFF_TO_ZARR {
     path obs_dir
 
     output:
-    path 'L0',           emit: l0_dir
+    path 'L0', emit: l0_dir
     path 'manifest.tsv', emit: manifest
 
     script:

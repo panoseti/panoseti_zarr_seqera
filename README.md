@@ -33,6 +33,14 @@ in Docker, and on SDSC Expanse (SLURM + Singularity).
 
 ---
 
+## Relationship to `pypff`
+
+This pipeline depends on `pypff[zarr]` (installed in editable mode from `../pypff`).
+The L0 conversion step (`bin/pff2zarr`) calls `pypff.zarr.convert_run` directly — no
+hand-written PFF parsing. The L0 stores follow the [pypff Zarr v3 spec](https://github.com/panoseti/pypff/blob/opt/docs/zarr_v3_spec.md).
+
+---
+
 ## Profiles
 
 | Profile | Executor | Container | When to use |
@@ -265,10 +273,3 @@ nextflow run . -profile docker --input_obs_dir obs_TEST.pffd --outdir results_sm
 - **Tower run stuck at `SUBMITTED`**: check that the Expanse compute environment is healthy
   and the queue has available slots. Use `tw runs view ... download --type log`.
 
----
-
-## Relationship to `pypff`
-
-This pipeline depends on `pypff[zarr]` (installed in editable mode from `../pypff`).
-The L0 conversion step (`bin/pff2zarr`) calls `pypff.zarr.convert_run` directly — no
-hand-written PFF parsing. The L0 stores follow the [pypff Zarr v3 spec](../pypff/docs/zarr_v3_spec.md).
